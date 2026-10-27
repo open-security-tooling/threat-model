@@ -3,7 +3,7 @@
 # SLSA Build L2 today; stage 2 moves build and attest into an org reusable
 # workflow for L3. Action pins are full SHAs of releases at least two weeks old.
 #
-# Why there are five jobs:
+# Why there are four jobs:
 #   preflight  Checks the tag: semver, annotated, signature verified by GitHub, and
 #              pointing at a commit on main. Runs no repo code.
 #   build      Runs our build (Go, npm, syft). It gets no id-token, no write token and
@@ -17,13 +17,13 @@
 #   release    Creates a draft release, uploads all assets, then publishes it. With
 #              immutable releases turned on, publishing locks the assets and the tag
 #              and GitHub adds a release attestation.
-#   homebrew   Opens a PR on open-security-tooling/homebrew-tap using a short-lived
-#              GitHub App token. The App key lives only in the `homebrew-tap`
-#              environment, which only v* tags can use. Skipped for pre-releases.
 #
-# Repo settings this needs: environments `release` and `homebrew-tap`, both
-# limited to v* tags; `homebrew-tap` holds secret TAP_APP_PRIVATE_KEY and
-# variable TAP_APP_CLIENT_ID. Immutable releases on.
+# Repo settings this needs: the `release` environment limited to v* tags,
+# the release-tags ruleset, and immutable releases.
+#
+# Homebrew: nothing here writes to the tap. open-security-tooling/homebrew-tap
+# pulls each release, verifies its provenance and proposes the formula update,
+# so no credential for another repo exists anywhere.
 
 name: Release
 
@@ -298,108 +298,3 @@ jobs:
           # Draft first, upload everything, then publish: an immutable release can't take assets after publishing.
           gh release create "$TAG" dist/* "${flags[@]}"
           gh release edit "$TAG" --repo "$REPO" --draft=false
-
-  homebrew:
-    needs: [preflight, release]
-    # Skipped for pre-releases, and until the tap's GitHub App is set up.
-    if: needs.preflight.outputs.prerelease == 'false' && vars.TAP_APP_CLIENT_ID != ''
-    runs-on: ubuntu-latest
-    environment: homebrew-tap # tags v* only; the only place the App key exists
-    permissions: {} # the GitHub App token does the work; GITHUB_TOKEN gets nothing
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release-dist
-          path: dist
-
-      - name: Render the formula
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          sum() { awk -v f="$1" '$2 == f { print $1 }' dist/checksums.txt | grep -E '^[0-9a-f]{64}$'; }
-          base="https://github.com/${REPO}/releases/download/${TAG}"
-          # Assignments, not inline $(...), so a missing checksum stops the job.
-          darwin_arm64=$(sum threat_darwin_arm64); darwin_amd64=$(sum threat_darwin_amd64)
-          linux_arm64=$(sum threat_linux_arm64);   linux_amd64=$(sum threat_linux_amd64)
-          cat > threat.rb <<EOF
-          # Updated by the threat-model release workflow. Review the PR, then merge.
-          class Threat < Formula
-            desc "Threat modeling for developers: plain-file models, explained risk, CI checks"
-            homepage "https://github.com/${REPO}"
-            version "${VERSION}"
-            license "Apache-2.0"
-
-            on_macos do
-              on_arm do
-                url "${base}/threat_darwin_arm64"
-                sha256 "${darwin_arm64}"
-              end
-              on_intel do
-                url "${base}/threat_darwin_amd64"
-                sha256 "${darwin_amd64}"
-              end
-            end
-
-            on_linux do
-              on_arm do
-                url "${base}/threat_linux_arm64"
-                sha256 "${linux_arm64}"
-              end
-              on_intel do
-                url "${base}/threat_linux_amd64"
-                sha256 "${linux_amd64}"
-              end
-            end
-
-            def install
-              binary = Dir["threat_*"].fetch(0)
-              chmod 0755, binary
-              bin.install binary => "threat"
-            end
-
-            test do
-              assert_equal "threat #{version}", shell_output("#{bin}/threat version").strip
-            end
-          end
-          EOF
-          cat threat.rb
-
-      - name: Get a token for the tap repo only
-        id: app
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.TAP_APP_CLIENT_ID }}
-          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
-          owner: open-security-tooling
-          repositories: homebrew-tap
-          permission-contents: write
-          permission-pull-requests: write
-
-      - name: Open a pull request on the tap
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          VERSION: ${{ needs.preflight.outputs.version }}
-          TAG: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          tap=open-security-tooling/homebrew-tap
-          branch="threat-${VERSION}"
-          base=$(gh api "repos/$tap/git/ref/heads/main" --jq .object.sha)
-          gh api -X POST "repos/$tap/git/refs" -f ref="refs/heads/$branch" -f sha="$base" > /dev/null
-
-          args=(-X PUT "repos/$tap/contents/Formula/threat.rb"
-                -f message="threat ${VERSION}" -f branch="$branch" -f content="$(base64 -w0 threat.rb)")
-          if current=$(gh api "repos/$tap/contents/Formula/threat.rb?ref=main" --jq .sha 2>/dev/null); then
-            args+=(-f sha="$current")
-          fi
-          # No author or committer fields: GitHub then signs the commit as the App,
-          # which passes the tap's signed-commits rule.
-          gh api "${args[@]}" > /dev/null
-
-          gh api -X POST "repos/$tap/pulls" -f base=main -f head="$branch" -f title="threat ${VERSION}" \
-            -f body="Release: https://github.com/${REPO}/releases/tag/${TAG}. CI checks every URL's provenance before this can merge." \
-            --jq .html_url

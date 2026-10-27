@@ -21,5 +21,5 @@ A developer-friendly threat modeling tool: Go core + `threat` CLI, MCP server, a
 - Security-first: model files are untrusted input (they arrive in PRs). Never follow paths outside the repo, never render model text as HTML, keep parse limits.
 - Dependencies: stdlib first. Any new module or npm package needs a reason; pin exact versions.
 - User-facing text is plain developer language: "who could do what by how", no unexplained acronyms. Errors say what's wrong and how to fix it.
-- Tests that create git repos must isolate git config (see `isolatedGit` in `internal/check/check_test.go`). The maintainer's global config signs commits with a hardware key, so an un-isolated test would hang waiting for a touch.
+- Tests that create git repos must isolate git config (see `isolatedGit` in `internal/check/check_test.go`). The maintainer's global config signs every commit with their hardware key, which tests must never use.
 - Use React (TS) for UI work, not Svelte.
