@@ -262,6 +262,10 @@ func distance(a, b string) int {
 	if strings.Contains(b, a) || strings.Contains(a, b) {
 		return 1
 	}
+	// Only used to suggest IDs, which are short; anything longer isn't a typo.
+	if len(a) > 256 || len(b) > 256 {
+		return len(a) + len(b)
+	}
 	prev := make([]int, len(b)+1)
 	for j := range prev {
 		prev[j] = j

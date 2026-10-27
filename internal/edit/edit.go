@@ -512,7 +512,7 @@ func isInlineNode(n ast.Node) bool {
 }
 
 func cloneWith(m map[string]any, k string, v any) map[string]any {
-	out := make(map[string]any, len(m)+1)
+	out := make(map[string]any, len(m))
 	for key, val := range m {
 		out[key] = val
 	}

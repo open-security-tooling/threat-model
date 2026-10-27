@@ -198,6 +198,10 @@ func suggestionHint(src []byte, custom map[string]string, from, target string, a
 // editDistance is the Levenshtein distance between a and b.
 func editDistance(a, b string) int {
 	ra, rb := []rune(a), []rune(b)
+	// Only used to suggest IDs, which are short; anything longer isn't a typo.
+	if len(ra) > 256 || len(rb) > 256 {
+		return len(ra) + len(rb)
+	}
 	prev := make([]int, len(rb)+1)
 	cur := make([]int, len(rb)+1)
 	for j := range prev {
