@@ -233,13 +233,16 @@ export function PathsView({ view }: { view: View }) {
 
         {mode === 'paths' && result && result.fixes.length > 0 && (
           <section className="panel-section">
-            <h3>Fixes that cut these paths</h3>
+            <h3>Fixes that cut or slow these paths</h3>
             <ul className="plain">
               {result.fixes.map((f) => (
                 <li key={f.mitigation}>
                   {f.title}{' '}
                   <span className="muted">
-                    ({L.label(L.mitigationStatuses, f.status)}) breaks {f.breaks.length === 1 ? '1 path' : `${f.breaks.length} paths`}
+                    ({L.label(L.mitigationStatuses, f.status)})
+                    {f.breaks.length > 0 && <> cuts off {f.breaks.map(name).join(', ')}</>}
+                    {f.breaks.length > 0 && (f.harder ?? []).length > 0 && ';'}
+                    {(f.harder ?? []).length > 0 && <> makes the easiest way to {f.harder.map(name).join(', ')} harder</>}
                   </span>
                 </li>
               ))}

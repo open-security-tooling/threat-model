@@ -1109,6 +1109,9 @@
   color: var(--text);
   text-align: left;
   cursor: pointer;
+  /* A wrapping inline-block takes its baseline from its last line, which
+     would push the list number down; align to the top instead. */
+  vertical-align: top;
 }
 .path-steps {
   margin: 4px 0 0;

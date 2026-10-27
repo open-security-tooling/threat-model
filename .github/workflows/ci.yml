@@ -28,6 +28,8 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
+      - name: Known vulnerabilities (only reports code we actually call)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Fuzz (short)
         run: |
           go test ./internal/model -run '^$' -fuzz FuzzParse -fuzztime 30s
@@ -63,5 +65,7 @@ jobs:
         working-directory: web
         run: |
           npm ci --ignore-scripts
+          npm audit --omit=dev --audit-level=high
           npm run typecheck
+          npm run contrast
           npm run build

@@ -335,7 +335,10 @@ export interface FixImpact {
   mitigation: string;
   title: string;
   status: string;
+  /** Data the attacker could no longer reach at all. */
   breaks: string[];
+  /** Data still reachable, but only through harder steps. */
+  harder: string[];
 }
 
 export interface PathsResult {

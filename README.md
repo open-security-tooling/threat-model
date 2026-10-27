@@ -1,76 +1,70 @@
+<div align="center">
+
 # threat-model
 
-> **Status: early development.** The core, CLI, threat library and simulation work; the web app and MCP server are being built. The docs in [`docs/`](docs/) describe the full design. Expect the format to change before v1.
+**Threat modeling that developers actually do.**
 
-A threat modeling tool for developers. Describe your system in a plain file that lives in your repo. See it as a diagram in your browser. Get threats explained the way a senior engineer would explain them to you. Your coding agent can keep it all up to date.
+A plain file in your repo. Threats explained the way a senior engineer would explain them. A diagram in your browser, a CLI for CI, and an MCP server so your coding agent keeps it all up to date.
 
-## Why another threat modeling tool?
+[![CI](https://github.com/open-security-tooling/threat-model/actions/workflows/ci.yml/badge.svg)](https://github.com/open-security-tooling/threat-model/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/open-security-tooling/threat-model/badge)](https://scorecard.dev/viewer/?uri=github.com/open-security-tooling/threat-model)
+[![SLSA build provenance](https://img.shields.io/badge/SLSA-build%20L2-4c1)](#built-like-a-security-tool)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Go](https://img.shields.io/github/go-mod/go-version/open-security-tooling/threat-model)](go.mod)
 
-Most open-source threat modeling tools fall short in the same four ways:
+[**Try it in your browser**](https://open-security-tooling.github.io/threat-model/) · [Install](#install) · [60-second tour](#a-60-second-tour) · [Docs](#docs)
 
-| Problem | What we do instead |
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/threat-card-dark.png">
+  <img alt="The threat-model web app: a diagram of an invoicing service next to a threat card that explains, in plain language, how a logged-in customer could read other customers' invoices, why that's critical, and which fix brings it to low." src="docs/images/threat-card-light.png">
+</picture>
+
+</div>
+
+## Why
+
+Most threat models are written once for a review, in a language developers don't speak, and never touched again. This one is built to be different:
+
+| Usually | Here |
 |---|---|
-| **They speak security, not dev.** STRIDE, CAPEC, MITRE ATT&CK and CWE come first. | Plain language by default: *"A logged-in customer could read other customers' invoices by changing the ID in the URL."* The security mappings are still there, one click away, for the people who need them. |
-| **They don't explain the risk.** You get a label like "Information Disclosure, Severity 7.2" and no idea what it means for you. | Every threat comes with the attack, step by step, along with who could do it, how hard it is and what breaks. The risk level comes with a one-sentence reason: *"Critical, because anyone who signs up could do it in minutes, with no special skill; the impact is high: it exposes every customer's invoices."* |
-| **They're hard to use.** Desktop-only apps, clunky editors, models locked in a database. | A zero-install web app (think Excalidraw, but for threat models) that runs entirely in your browser, plus a CLI. The file is the source of truth, and it's readable without either. |
-| **They go stale.** You make a model once for a review, and it never matches the code again. | Built for agents and CI. The model links to code paths, and `threat check` flags threats that need another look when that code changes. An MCP server lets agents read and update the model safely. |
+| *"Information Disclosure (STRIDE), CWE-639, CVSS 6.8"* | *"A logged-in customer could read other customers' invoices by changing the invoice ID in the URL."* The security mappings are still there, one click away. |
+| A risk score with no reason | **Critical**, *because anyone who signs up could do it in minutes, with no special skill; the impact is high: exposes names, addresses and amounts for every customer.* |
+| A desktop app, or a server you have to host | A file in your repo, a [zero-install web app](https://open-security-tooling.github.io/threat-model/) that never uploads anything, and a CLI |
+| Out of date the week after the review | CI flags threats when the code they cover changes, and your coding agent updates the model in the same PR |
+| A blank page | 84 threats from a built-in library, suggested for your stack and filled in with your component names |
 
-## How it works
+## Install
 
-```
-                 threatmodel.yaml   ← lives in your repo, reviewed in PRs
-                 ▲      ▲      ▲
-       ┌─────────┘      │      └──────────┐
-       │                │                 │
-   Web app           threat CLI          threat mcp
- (browser, WASM)   (you, CI)       (your agents)
-       │                │                 │
-       └────────────────┴─────────────────┘
-               one Go core: parse, validate,
-             explain risk, suggest threats, check
+```sh
+brew install open-security-tooling/tap/threat      # macOS and Linux
+go install github.com/open-security-tooling/threat-model/cmd/threat@latest   # CLI and MCP; web app not embedded
 ```
 
-- **One file.** `threatmodel.yaml` describes your components, how data flows between them, the threats and the fixes. It's designed to be pleasant to read and diff, and hard to get wrong. Editors autocomplete it through a published JSON Schema.
-- **One core, three front ends.** The Go core does all the real work. It's compiled into the `threat` CLI and into WebAssembly for the web app, and it's exposed to agents through `threat mcp`. A model behaves the same everywhere.
-- **Serverless web app.** It's hosted on GitHub Pages, and your model never leaves your machine. Open a file, edit the diagram, save it back. `threat serve` runs the same app locally with live reload, so you can watch the diagram change as your agent edits the file.
+Or download a binary from [releases](https://github.com/open-security-tooling/threat-model/releases). Every release is built in GitHub Actions with signed build provenance, so you can check where a binary came from:
 
-## A taste of the file
-
-```yaml
-# yaml-language-server: $schema=https://open-security-tooling.github.io/threat-model/schema/v1.json
-version: 1
-system:
-  name: Invoice service
-
-components:
-  - id: api
-    name: Invoice API
-    kind: service
-    exposure: internet
-    code: ["internal/invoice/**"]
-
-threats:
-  - id: read-others-invoices
-    title: A logged-in customer could read other customers' invoices by changing the invoice ID in the URL
-    affects: [api]
-    kind: leak
-    attack:
-      - Sign up for a free account and create an invoice.
-      - Open it and note the URL, e.g. /invoices/1042.
-      - Change it to /invoices/1041.
-    who: any-user
-    effort: trivial
-    impact: high
-    mitigations: [check-invoice-owner]
-
-mitigations:
-  - id: check-invoice-owner
-    title: Check the invoice belongs to the caller's account before returning it
-    status: in-progress
-    effect: eliminates
-    evidence:
-      - test: internal/invoice/handler_test.go#TestGetInvoice_OtherAccount
+```sh
+gh attestation verify threat_darwin_arm64 --repo open-security-tooling/threat-model \
+  --signer-workflow open-security-tooling/threat-model/.github/workflows/release.yml
 ```
+
+> The first release (v0.1.0) is on its way. Until then, build from source: `make web build-web` (needs Go and Node 22).
+
+No install needed for the web app: [open it in your browser](https://open-security-tooling.github.io/threat-model/). It runs entirely on your machine (the Go core is compiled to WebAssembly) and never sends your model anywhere.
+
+## A 60-second tour
+
+```console
+$ threat init --agents AGENTS.md        # a starter threatmodel.yaml, plus instructions for your coding agent
+$ threat suggest                         # threats from the library that fit what you've described
+$ threat explain read-others-invoices    # the plain-language card, with why it's this risk
+$ threat paths                           # how an attacker could chain threats to reach your data
+$ threat serve                           # the web app on this file, live-synced as you or an agent edit it
+$ threat check --base origin/main        # in CI: what this change means for the threat model
+```
+
+### Explained risk, not scores
 
 ```console
 $ threat explain read-others-invoices
@@ -86,43 +80,154 @@ Who could do it: anyone with an account, including free sign-ups
 How hard: trivial (minutes, tools exist)
 How bad: high. Exposes names, addresses and amounts for every customer.
 
-Why this risk: Critical, because anyone who signs up could do it in minutes, with no special skill; the impact is high: Exposes names, addresses and amounts for every customer. Drops to low once the planned mitigations are done.
+Why this risk: Critical, because anyone who signs up could do it in minutes, with no special skill; the impact is high: exposes names, addresses and amounts for every customer. Drops to low once the planned mitigations are done.
 
 Fixes
-  [~] Check the invoice belongs to the caller's account before returning or changing it (in-progress; critical → low once done: makes this impossible)
-  [ ] Use random UUIDs for invoice IDs instead of sequential numbers (planned; critical → medium once done: it becomes much harder)
+  [~] Check the invoice belongs to the caller's account before returning or changing it (in-progress: critical → low once done; makes this impossible)
+  [ ] Use random UUIDs for invoice IDs instead of sequential numbers (planned: critical → medium once done; it becomes much harder)
 ```
 
-See the [full example](docs/examples/invoice-service.threatmodel.yaml).
+Risk comes from three questions anyone can answer (who could do it, how hard, how bad) and two small, published [tables](docs/risk.md). Every level comes with the sentence that explains it.
 
-## Design docs
+### See how attacks chain together
 
-| Doc | What's in it |
+<img alt="The attack paths view: four ways an attacker on the internet could reach data, each a numbered story ending in how the data gets out, highlighted on the diagram, with the fixes that cut each path." src="docs/images/paths-dark.png">
+
+A list of threats doesn't show how they combine. `threat paths` simulates an attacker moving through your model, using your zones, network segmentation, outbound access and service identities. It shows each way in as a short story, says how the data would get out, and ranks the fixes that cut the most paths. Pick a component to see its blast radius if it were compromised.
+
+### Built for agents and CI
+
+The model is one YAML file with a [published JSON Schema](schema/v1.json), stable IDs and comment-preserving formatting, so agent edits are small, reviewable diffs.
+
+- **MCP server (`threat mcp`):** agents can read the model, suggest threats, update fixes and find attack paths. Every write is validated, and an invalid one leaves the file untouched. Changes that make the model look safer are refused unless a person allows them: deleting or dismissing serious threats, downgrading them, overriding risk, accepting risk, recording reviews.
+- **`threat check --base origin/main`:**
+  - flags threats whose code changed since they were last reviewed
+  - catches fixes whose evidence disappeared from the code, and expired risk acceptances
+  - flags every change that lowers risk, so a model can't quietly be weakened
+- **Output for CI:** `--format github` gives annotations, `--format sarif` gives code-scanning alerts, and `--format summary` gives a PR comment. A [GitHub Action](action/) wraps it, and verifies the `threat` binary before running it.
+
+### For security teams
+
+Security teams get enforcement without making developers learn security vocabulary:
+- **A policy file,** [`.threat.yaml`](docs/policy.md), that they own through CODEOWNERS. It can:
+  - fail CI on open critical risks
+  - name approvers for risk-lowering changes
+  - cap how long a risk acceptance lasts
+  - require evidence, tests, due dates and sign-off
+- **A reviewer view** in the web app, with a risk register (CSV/JSON export) and a sign-off panel.
+- **Security mappings** (STRIDE, CWE, OWASP, CAPEC) on library entries, ready for audits.
+
+## What's in a model
+
+```yaml
+# threatmodel.yaml
+version: 1
+system:
+  name: Invoice service
+  tenancy: multi
+
+identities:
+  - id: api-role
+    name: Invoice API task role
+    kind: role
+    can: [{do: read, on: api}]
+
+components:
+  - id: api
+    name: Invoice API
+    kind: service
+    exposure: internet
+    features: [login, password-reset, export]
+    identity: api-role # what it can reach if it's ever compromised
+    code: ["internal/invoice/**"] # CI flags its threats when this code changes
+
+threats:
+  - id: read-others-invoices
+    title: A logged-in customer could read other customers' invoices by changing the invoice ID in the URL
+    kind: leak
+    affects: [api]
+    attack:
+      - Sign up for a free account and create an invoice.
+      - Change the invoice ID in the URL to a neighbour's.
+    who: any-user
+    effort: trivial
+    impact: high
+    status: open
+    mitigations: [check-invoice-owner]
+
+mitigations:
+  - id: check-invoice-owner
+    title: Check the invoice belongs to the caller's account before returning it
+    status: in-progress
+    effect: eliminates
+    evidence:
+      - test: internal/invoice/handler_test.go#TestGetInvoice_OtherAccount # checked in CI
+```
+
+The file also records the protections you already have: WAFs and gateways, network segmentation, outbound limits, encryption in transit and at rest, service identities and their permissions, monitoring and patching. The [full example](docs/examples/invoice-service.threatmodel.yaml) shows them all, and the [format reference](docs/model-format.md) explains each field.
+
+## Built like a security tool
+
+A threat model is a map of your weak spots, so the tool treats it that way:
+
+- **Your model stays with you.** No server, no accounts, no telemetry. The web app has a strict Content-Security-Policy that blocks every outbound connection, and the local server only listens on 127.0.0.1, behind a per-run token and Host/Origin checks.
+- **Untrusted input is expected.** Model files arrive in pull requests:
+  - YAML anchors, aliases and tags are rejected, and there are size and depth limits
+  - the parser and the editor are fuzzed in CI
+  - file paths can't escape the repository
+  - model text is never rendered as HTML
+- **Supply chain.**
+  - Only GitHub-owned and verified Actions, pinned to commit SHAs.
+  - Dependencies are few and pinned, and Dependabot waits 7 days before adopting a new version.
+  - CI runs CodeQL, dependency review, `govulncheck`, `npm audit` and OpenSSF Scorecard.
+  - Releases come from signed tags, with build provenance and an attested SBOM (SLSA Build L2; L3 is [next](docs/roadmap.md)).
+- **We use it on ourselves.** This repo's own [`threatmodel.yaml`](threatmodel.yaml) is checked in CI, with evidence pointing at the code that implements each defence. [docs/security.md](docs/security.md) walks through it.
+
+## How it works
+
+```
+                 threatmodel.yaml   ← lives in your repo, reviewed in PRs
+                 ▲      ▲      ▲
+       ┌─────────┘      │      └──────────┐
+       │                │                 │
+   Web app           threat CLI      threat mcp
+ (browser, WASM)   (you, CI)       (your agents)
+       │                │                 │
+       └────────────────┴─────────────────┘
+          one Go core: parse, validate, explain risk,
+          suggest threats, simulate, check, edit
+```
+
+One Go core powers all three, so a model behaves the same everywhere. The web app is React and TypeScript. All model logic runs in the core, compiled to WebAssembly, so the UI never edits YAML itself.
+
+## Docs
+
+| | |
 |---|---|
-| [Principles](docs/principles.md) | The rules we use to make design decisions |
-| [Concepts and language](docs/concepts.md) | The vocabulary: components, flows, zones, threats, risk, in dev terms |
-| [Model file format](docs/model-format.md) | The `threatmodel.yaml` spec |
-| [Risk](docs/risk.md) | How risk is scored and explained, without CVSS math |
-| [Threat library](docs/threat-library.md) | Built-in threat suggestions and how to write them |
-| [Simulation](docs/simulation.md) | Attack paths, blast radius, "which fix breaks the most paths", threats as tests |
-| [Web app](docs/web-app.md) | UX design for the browser app |
-| [Agents and staying up to date](docs/agents.md) | CLI, MCP server, CI checks, agent workflows |
-| [Policy for security teams](docs/policy.md) | `.threat.yaml`: enforcement, approvers, sign-off, what `check` reports about model changes |
-| [Architecture](docs/architecture.md) | Go core, WASM, CLI, repo layout, build and release |
-| [Security](docs/security.md) | The tool's own threat model. Yes, we dogfood. |
-| [Roadmap](docs/roadmap.md) | Milestones and open questions |
+| [Concepts](docs/concepts.md) | Components, flows, zones, threats and controls, in dev terms |
+| [Model format](docs/model-format.md) | Every field in `threatmodel.yaml` |
+| [Risk](docs/risk.md) | How risk is scored and explained |
+| [Threat library](docs/threat-library.md) | The built-in catalogs, and how to write your own |
+| [Simulation](docs/simulation.md) | Attack paths, exfiltration, blast radius |
+| [Agents and CI](docs/agents.md) · [CI setup](docs/ci.md) | The CLI, MCP server, `threat check` and the GitHub Action |
+| [Policy](docs/policy.md) | `.threat.yaml` for security teams |
+| [Web app](docs/web-app.md) | The browser app |
+| [Architecture](docs/architecture.md) · [Security](docs/security.md) · [Principles](docs/principles.md) · [Roadmap](docs/roadmap.md) | How it's built and why |
 
-## Prior art
+## How it compares
 
-We're learning from these tools. Each gets parts of this right, but none of them puts developer language, explained risk and agent-maintained models together in one tool.
-
-| Tool | What we borrow | Where we differ |
+| Tool | What it does well | Where threat-model differs |
 |---|---|---|
-| [Gram](https://github.com/klarna-incubator/gram) (Klarna) | Suggestions from your tech stack, a review workflow for security champions, a diagram-first UX | Gram is a server app with a database, SSO and websockets, and models live in its database. We're serverless and file-based, and review happens in PRs. |
-| [OWASP Threat Dragon](https://owasp.org/www-project-threat-dragon/) | A free, open, diagram-based tool | STRIDE- and LINDDUN-first vocabulary, and it doesn't explain risk |
-| [Threagile](https://github.com/Threagile/threagile) | YAML models and risk rules, in Go | Very large models in security vocabulary, built for generating reports rather than everyday editing |
-| [pytm](https://github.com/OWASP/pytm), [threatcl](https://github.com/threatcl/threatcl) | Models as code | No visual editing, and you need to know Python or HCL |
-| Microsoft Threat Modeling Tool | The classic DFD and STRIDE workflow | Windows-only desktop app with its own file format |
+| [OWASP Threat Dragon](https://owasp.org/www-project-threat-dragon/) | Free, open diagramming | Threat-model leads with plain language and explained risk, not STRIDE labels |
+| [Gram](https://github.com/klarna-incubator/gram) (Klarna) | Suggestions from your tech stack, reviews for security champions | Gram needs a server, a database and SSO. Threat-model is a file in your repo, and review happens in PRs. |
+| [Threagile](https://github.com/Threagile/threagile) | YAML models with risk rules, in Go | Threat-model is built for everyday editing by developers and agents, not just reports |
+| [pytm](https://github.com/OWASP/pytm), [threatcl](https://github.com/threatcl/threatcl) | Models as code | Threat-model needs no Python or HCL, and adds a visual editor |
+
+## Contributing
+
+Issues and pull requests are welcome; see the [contributing guide](https://github.com/open-security-tooling/.github/blob/main/CONTRIBUTING.md). New threat library entries are especially welcome. [docs/threat-library.md](docs/threat-library.md) explains the format and the writing rules.
+
+To report a vulnerability, please use [private vulnerability reporting](https://github.com/open-security-tooling/threat-model/security/advisories/new), not a public issue. See the [security policy](https://github.com/open-security-tooling/.github/blob/main/SECURITY.md).
 
 ## License
 
