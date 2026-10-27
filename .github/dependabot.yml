@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Keeps SHA-pinned actions up to date. Add an entry per package ecosystem the repo uses.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait before adopting new releases so compromised versions are more likely caught first.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
