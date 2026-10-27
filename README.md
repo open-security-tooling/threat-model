@@ -49,7 +49,7 @@ gh attestation verify threat_darwin_arm64 --repo open-security-tooling/threat-mo
   --signer-workflow open-security-tooling/threat-model/.github/workflows/release.yml
 ```
 
-> The first release (v0.1.0) is on its way. Until then, build from source: `make web build-web` (needs Go and Node 22).
+To build from source instead: `make web build-web` (needs Go and Node 22).
 
 No install needed for the web app: [open it in your browser](https://open-security-tooling.github.io/threat-model/). It runs entirely on your machine (the Go core is compiled to WebAssembly) and never sends your model anywhere.
 
