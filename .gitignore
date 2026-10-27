@@ -6,3 +6,4 @@
 # Built web app, embedded only by release builds (-tags webapp).
 /internal/webassets/dist/
 /threat
+/dist/
