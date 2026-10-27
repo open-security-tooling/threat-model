@@ -1,4 +1,4 @@
-.PHONY: build build-web test fuzz wasm web web-release release-build clean
+.PHONY: release release-preview build build-web test fuzz wasm web web-release release-build clean
 
 GO ?= go
 
@@ -36,3 +36,11 @@ release-build: web
 
 clean:
 	rm -rf bin web/dist web/public/core.wasm web/public/wasm_exec.js internal/webassets/dist
+
+# Cut a release: computes the next version from conventional commits since
+# the last tag, then creates and pushes a signed tag. Run on an up-to-date main.
+release:
+	scripts/release.sh
+
+release-preview:
+	scripts/release.sh --dry-run

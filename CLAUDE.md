@@ -14,6 +14,7 @@ A developer-friendly threat modeling tool: Go core + `threat` CLI, MCP server, a
 ## Commands
 
 - `make test` (vet + tests), `make fuzz`, `make build`, `make wasm`, `make web`
+- `make release-preview` shows the next version and notes; `make release` tags it (signed) from an up-to-date `main`
 - After changing the schema table: `go run ./cmd/threat schema > schema/v1.json` (a test enforces it)
 
 ## Rules
