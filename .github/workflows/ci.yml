@@ -28,6 +28,17 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
+      - name: Release builds leave the tree clean
+        # Release binaries must not be stamped vcs.modified=true; untracked
+        # build output counts, so this builds into dist/ like the release does.
+        run: |
+          mkdir -p dist
+          go build -trimpath -buildvcs=true -o dist/threat ./cmd/threat
+          if go version -m dist/threat | grep -q 'vcs.modified=true'; then
+            git status --porcelain
+            echo "::error::The build left the tree dirty; release binaries would be stamped vcs.modified=true."
+            exit 1
+          fi
       - name: Known vulnerabilities (only reports code we actually call)
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Fuzz (short)
