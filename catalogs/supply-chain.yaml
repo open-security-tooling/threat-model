@@ -1,0 +1,232 @@
+# Dependencies, CI/CD and releases.
+
+- id: ci-secret-theft
+  title: Someone who slips malicious code into a dependency or CI action could steal {data} from {component}
+  kind: escalate
+  applies:
+    component:
+      kind: [pipeline]
+      stores: [secret]
+  attack:
+    - Take over a package or CI action that the pipeline uses, or publish a lookalike.
+    - Their code runs inside a CI job.
+    - It reads the secrets available to that job and sends them out.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: pin-actions-and-cooldown
+      title: Pin CI actions to full commit SHAs and wait a few days before adopting new dependency versions
+      effect: {effort: hard}
+    - id: short-lived-deploy-creds
+      title: Use short-lived OIDC credentials that only a protected deploy environment can request
+      effect: {who: privileged}
+      by_tech:
+        github-actions: "Use `permissions:` with `id-token: write` only in the deploy job, and an environment with required reviewers."
+        aws: Trust GitHub's OIDC provider with a role condition on the repo and environment, instead of storing access keys.
+  why_it_matters: >
+    CI jobs run lots of third-party code next to your most powerful
+    credentials. One compromised package can deploy to production.
+  refs: {stride: [elevation-of-privilege], cwe: [CWE-829]}
+
+- id: untrusted-pull-request-code
+  title: Anyone who opens a pull request could run code with {component}'s secrets if a workflow runs their changes with secrets available
+  kind: escalate
+  applies:
+    component:
+      kind: [pipeline]
+      tech: [github-actions]
+  attack:
+    - Fork the repository and change a build script or test.
+    - Open a pull request.
+    - A workflow that checks out the pull request's code with secrets (for example on pull_request_target) runs it.
+  defaults: {who: anyone, effort: moderate, impact: critical}
+  mitigations:
+    - id: no-secrets-for-untrusted-code
+      title: Never run pull request code in workflows that have secrets or write tokens
+      effect: eliminates
+      by_tech:
+        github-actions: Use `pull_request` (no secrets) for building and testing forks; avoid checking out the PR head in `pull_request_target`.
+    - id: read-only-default-token
+      title: Default the workflow token to read-only and grant write permissions per job
+      effect: {impact: medium}
+  why_it_matters: >
+    This is one of the most common ways open-source projects lose their
+    secrets. The workflow looks harmless until someone reads the trigger.
+  refs: {cwe: [CWE-829]}
+
+- id: dependency-compromise
+  title: Someone who publishes a malicious version of a package {component} depends on could run their code inside it
+  kind: tamper
+  applies:
+    component:
+      kind: [service, client]
+      tech: [node, npm, python, pip, ruby, java, go, rust, php]
+  attack:
+    - Take over a maintainer account, or publish a package with a lookalike name.
+    - Release a version containing malicious code.
+    - The next install or update pulls it into the build and the running app.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  gives:
+    controls: ["{component}"]
+  mitigations:
+    - id: lockfiles-and-review
+      title: Commit lockfiles, review dependency updates, and wait a few days before adopting new releases
+      effect: {effort: hard}
+    - id: scoped-registries
+      title: Use scoped or private registry settings so internal package names can't be taken from the public registry
+      effect: {effort: hard}
+  why_it_matters: >
+    Most of the code you ship is someone else's. Install scripts and
+    imports run with full access to the build and the app.
+  refs: {cwe: [CWE-1357, CWE-494]}
+
+- id: unsigned-releases
+  title: Someone could swap the files users download from {component}'s releases for tampered ones, and users couldn't tell
+  kind: tamper
+  applies:
+    component:
+      kind: [pipeline]
+      tech: [releases, homebrew, npm-publish, pypi-publish, container-registry, ghcr, docker-hub]
+  attack:
+    - Get write access to where releases are published, such as the release page or package registry.
+    - Replace a release file with a modified one.
+    - Users install it, because nothing proves where it came from.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  mitigations:
+    - id: signed-release-provenance
+      title: Publish checksums and signed build provenance, and document how users verify them
+      effect: {effort: hard}
+      by_tech:
+        github-actions: Use GitHub artifact attestations (`actions/attest-build-provenance`) and tell users to run `gh attestation verify`.
+  why_it_matters: >
+    Without signatures or provenance, a compromised release looks exactly
+    like a real one.
+  refs: {cwe: [CWE-494]}
+
+- id: known-vulnerabilities
+  title: Anyone could exploit a publicly known vulnerability in {component}'s libraries, base image or software, if updates aren't applied soon after fixes are published
+  kind: escalate
+  applies:
+    component:
+      kind: [service, gateway, database, cache, queue, identity]
+      patching: [manual, unknown]
+      not_managed: true
+  attack:
+    - Watch for published vulnerabilities in common libraries and software.
+    - Scan for systems still running the vulnerable version, using public exploit code where it exists.
+    - Use the vulnerability to run code in or take over {component}.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  gives:
+    controls: ["{component}"]
+  mitigations:
+    - id: automated-dependency-updates
+      title: Get dependency and base image updates proposed automatically (Dependabot or Renovate), and merge security fixes within days
+      effect: {effort: hard}
+    - id: vulnerability-scanning
+      title: Scan dependencies and images for known vulnerabilities in CI, and fail builds on severe ones
+      effect: detects
+      by_tech:
+        go: Run `govulncheck ./...` in CI; it only reports vulnerabilities in code you actually call.
+        node: Run `npm audit --omit=dev` or osv-scanner in CI.
+        python: Run `pip-audit` in CI.
+        docker: Scan images with Trivy or Grype before pushing them.
+  why_it_matters: >
+    Once a vulnerability is published, attackers scan for it within hours.
+    Falling weeks behind on updates is one of the most common ways in.
+  refs: {cwe: [CWE-1104], owasp: ["A06:2021"]}
+
+- id: ci-cache-poisoning
+  title: Someone who gets code running in any of {component}'s jobs, for example through a pull request or a compromised dependency, could plant tampered files in its build cache that a later release or deploy job restores and ships
+  kind: tamper
+  applies:
+    component:
+      kind: [pipeline]
+  attack:
+    - In a test repository, list which jobs save caches and which restore them, including release and deploy jobs.
+    - Check which cache keys a pull request job or another low-trust job can write, and whether release jobs restore those keys.
+    - Note that a tampered dependency or build output in that cache would be restored into the release with no change in the repository.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  mitigations:
+    - id: no-cache-in-release-jobs
+      title: Don't restore caches in release and deploy jobs, and build them from a clean checkout with locked dependencies
+      effect: eliminates
+      by_tech:
+        github-actions: Leave `actions/cache` and the cache option of setup actions out of release workflows, and never run untrusted code in `pull_request_target` or `workflow_run` jobs, which can write the default branch's cache.
+        gitlab-ci: Keep separate caches for protected branches, and don't let merge request pipelines write cache keys that protected pipelines read.
+    - id: verify-restored-dependencies
+      title: Check dependencies restored from a cache against the lockfile's hashes before building with them
+      effect: {effort: hard}
+      by_tech:
+        node: Run `npm ci`, which checks every package against the integrity hashes in `package-lock.json`, instead of restoring a cached `node_modules`.
+        go: Run `go mod verify` before building from a restored module cache, and don't restore the build cache in release jobs.
+        python: Install with `pip install --require-hashes` from a hashed lockfile, so cached packages must match.
+  why_it_matters: >
+    Caches are shared between jobs that don't share the same trust. Poisoning
+    one is quiet, because nothing changes in the repository and the release job
+    simply restores it.
+  refs: {stride: [tampering], cwe: [CWE-829]}
+
+- id: shared-self-hosted-runner
+  title: Anyone who opens a pull request could run code on {component}'s self-hosted build machines and stay there, reading secrets and tampering with later jobs, if those machines also build untrusted pull requests
+  kind: escalate
+  applies:
+    component:
+      kind: [pipeline]
+      tech: [self-hosted-runner, self-hosted-runners, self-hosted, actions-runner-controller, gitlab-runner, jenkins, buildkite]
+  attack:
+    - Check whether workflows that run on pull requests from forks or outside contributors may use the self-hosted machines.
+    - In a test repository, open a pull request whose build step only records what it can see, such as the network, other jobs' files and cached credentials.
+    - See whether anything it left behind is still there when the next trusted job runs on the same machine.
+  defaults: {who: anyone, effort: moderate, impact: critical}
+  mitigations:
+    - id: no-untrusted-prs-on-self-hosted
+      title: Never let pull requests from forks or new contributors run on self-hosted machines, and build them on hosted, throwaway runners instead
+      effect: eliminates
+      by_tech:
+        github-actions: Require approval for workflows from outside collaborators, and limit self-hosted runner groups to selected trusted repositories and workflows.
+    - id: ephemeral-runners
+      title: Use ephemeral runners that are created for one job and destroyed afterwards, so nothing carries over between jobs
+      effect: {impact: medium}
+      by_tech:
+        github-actions: Register runners with `--ephemeral` or use Actions Runner Controller, and keep runners for public repositories in their own runner group.
+    - id: isolate-runner-network
+      title: Put build machines in their own network without access to internal systems or the cloud metadata service, and give them no standing cloud credentials
+      effect: {impact: medium}
+  why_it_matters: >
+    Self-hosted runners usually keep state between jobs and sit inside your
+    network. One pull request can leave something behind that the next release
+    job runs with all its secrets.
+  refs: {stride: [elevation-of-privilege, tampering], cwe: [CWE-829]}
+
+- id: secrets-in-iac-state
+  title: Someone who can read {component}'s Terraform or other infrastructure-as-code state files could get the database passwords, private keys and tokens recorded in them in plain text
+  kind: leak
+  applies:
+    component:
+      kind: [storage, pipeline]
+      tech: [terraform, opentofu, terragrunt, pulumi, terraform-cloud, hcp-terraform]
+  attack:
+    - Find where state is kept, such as a storage bucket, a CI artifact, a local file or a hosted workspace.
+    - Check who can read it, including CI jobs that run on pull requests and everyday developer roles.
+    - Open a state file from a test environment and look for passwords, private keys and tokens in it.
+  defaults: {who: insider, effort: trivial, impact: high}
+  mitigations:
+    - id: restrict-state-access
+      title: Keep state in a dedicated, encrypted and versioned backend that only the deploy role can read, never in the repository or CI artifacts
+      effect: {who: privileged}
+      by_tech:
+        terraform: Use a remote backend in a separate account or project with access limited to the apply role, and give plan jobs on pull requests a role that can't read production state.
+        s3: Turn on KMS encryption, versioning and Block Public Access on the state bucket, and allow `s3:GetObject` only for the deploy role.
+    - id: keep-secrets-out-of-state
+      title: Keep secrets out of state by letting the cloud provider generate and store them, and by reading other secrets at runtime from a secrets manager
+      effect: {impact: medium}
+      by_tech:
+        terraform: Use `manage_master_user_password` for RDS, and ephemeral resources and write-only arguments where your version supports them, instead of `random_password` for long-lived credentials.
+        opentofu: Turn on OpenTofu state encryption with a KMS key provider, and use ephemeral resources for credentials.
+        pulumi: Mark sensitive values as secrets so Pulumi encrypts them in state, and use a KMS-backed secrets provider.
+  why_it_matters: >
+    Terraform writes every attribute of every resource to state, including
+    generated passwords and private keys. State files get copied to buckets,
+    artifacts and laptops with far looser access than the secrets themselves.
+  refs: {stride: [information-disclosure], cwe: [CWE-312]}

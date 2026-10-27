@@ -1,0 +1,8 @@
+/bin/
+/web/node_modules/
+/web/dist/
+/web/public/core.wasm
+/web/public/wasm_exec.js
+# Built web app, embedded only by release builds (-tags webapp).
+/internal/webassets/dist/
+/threat

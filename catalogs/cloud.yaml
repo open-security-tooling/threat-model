@@ -1,0 +1,159 @@
+# Cloud accounts, storage and credentials.
+
+- id: public-bucket
+  title: Anyone could download {data} from {component} if the bucket is made public by mistake
+  kind: leak
+  applies:
+    component:
+      kind: [storage]
+      stores: [confidential, secret]
+  attack:
+    - Guess or find the bucket name, for example from URLs the app returns.
+    - List or download its files without any credentials.
+  defaults: {who: anyone, effort: trivial, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: block-public-access
+      title: Turn on account-wide block-public-access so no bucket can be made public
+      effect: eliminates
+      by_tech:
+        s3: Enable S3 Block Public Access at the account level, ideally through an organization policy.
+    - id: short-lived-download-links
+      title: Serve files through short-lived signed URLs instead of public objects
+      effect: {effort: hard}
+  why_it_matters: >
+    A single checkbox or policy line exposes everything in the bucket, and
+    scanners look for public buckets constantly.
+  refs: {cwe: [CWE-284]}
+
+- id: broad-cloud-permissions
+  title: Someone who gets code running in {component} could reach far more of the cloud account than it needs, because its role has broad permissions
+  kind: escalate
+  applies:
+    component:
+      kind: [service, pipeline]
+      tech: [aws, aws-ecs, aws-lambda, aws-ec2, gcp, azure, kubernetes]
+      identity_rights: [none, admin]
+  attack:
+    - Get code execution in {component} through any bug.
+    - Use its cloud role to list and read other resources in the account.
+    - Find credentials or data that let them go further.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  mitigations:
+    - id: least-privilege-roles
+      title: Give each workload its own role with only the actions and resources it uses
+      effect: {impact: medium}
+  why_it_matters: >
+    Broad roles turn a bug in one small service into access to the whole
+    account.
+  refs: {cwe: [CWE-250]}
+
+- id: metadata-credential-theft
+  title: Someone who can make {component} send requests could read its cloud credentials from the instance metadata service
+  kind: leak
+  applies:
+    component:
+      kind: [service]
+      tech: [aws-ecs, aws-ec2, ec2, eks, gce, gke]
+      not_managed: true
+  attack:
+    - Find a way to make the service request an address of your choosing.
+    - Point it at the metadata endpoint.
+    - Read the temporary credentials it returns.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  mitigations:
+    - id: require-imdsv2
+      title: Require token-based metadata access (IMDSv2) and limit metadata hops
+      effect: {effort: hard}
+  why_it_matters: >
+    The metadata service hands credentials to anything that can make the
+    machine send a request, including a bug in your code.
+  refs: {cwe: [CWE-918]}
+
+- id: long-lived-cloud-keys
+  title: Someone who finds a long-lived cloud access key used by {component} in a repo, log or laptop could use it from anywhere
+  kind: impersonate
+  applies:
+    component:
+      kind: [service, pipeline]
+      stores: [secret]
+  attack:
+    - Find a key that was committed, logged, or left in an environment file.
+    - Use it from their own machine.
+    - It keeps working until someone notices and rotates it.
+  defaults: {who: anyone, effort: moderate, impact: critical}
+  mitigations:
+    - id: no-static-keys
+      title: Replace static keys with workload identity or short-lived credentials
+      effect: {impact: medium}
+    - id: secret-scanning
+      title: Turn on secret scanning and push protection for your repositories
+      effect: detects
+  why_it_matters: >
+    Static keys get copied around and never expire. Leaked keys are found
+    and used within minutes.
+  refs: {cwe: [CWE-798]}
+
+- id: over-privileged-identity
+  title: Someone who takes over anything running as {identity} could do far more than it needs, because {identity} has admin rights
+  kind: escalate
+  applies:
+    identity:
+      can: [admin]
+  attack:
+    - Get code running in any component that uses {identity}.
+    - Use the identity's credentials, which the platform hands to that code.
+    - Exercise its admin rights to read, change or delete what it administers.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  mitigations:
+    - id: least-privilege-identity
+      title: Replace admin rights on {identity} with the specific read or write permissions it uses
+      effect: {impact: medium}
+  why_it_matters: >
+    Identities are what attackers inherit. Admin rights granted "to make it
+    work" turn a small bug into a full compromise.
+  refs: {cwe: [CWE-250]}
+
+- id: shared-identity
+  title: Someone who breaks into any one component running as {identity} could use every permission it has, because several components share it
+  kind: escalate
+  applies:
+    identity:
+      shared: true
+  attack:
+    - Find the least-protected component that runs as {identity}.
+    - Compromise it.
+    - Use the shared identity to reach what the other components can.
+  defaults: {who: anyone, effort: hard, impact: high}
+  mitigations:
+    - id: one-identity-per-workload
+      title: Give each component its own identity with only the permissions that component needs
+      effect: {impact: medium}
+  why_it_matters: >
+    Shared identities mean the weakest component sets the security of all
+    of them.
+  refs: {cwe: [CWE-250]}
+
+- id: long-lived-api-key
+  title: Someone who finds {identity} in a repo, log or laptop could use it from anywhere until someone notices and rotates it
+  kind: impersonate
+  applies:
+    identity:
+      kind: [api-key]
+  attack:
+    - Find the key, for example in a committed config file, a CI log or a copied environment file.
+    - Use it from their own machine.
+    - It keeps working until it's rotated.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  mitigations:
+    - id: short-lived-credentials
+      title: Replace the long-lived key with short-lived credentials issued to the workload
+      effect: {impact: medium}
+    - id: scan-and-rotate-keys
+      title: Turn on secret scanning and push protection, and rotate the key on a schedule
+      effect: detects
+  why_it_matters: >
+    Keys get copied into places nobody tracks, and they don't expire.
+    Leaked keys are usually used within minutes.
+  refs: {cwe: [CWE-798]}

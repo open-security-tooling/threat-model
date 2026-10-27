@@ -1,0 +1,208 @@
+# Multi-tenant SaaS: keeping each customer's data, load and lifecycle separate.
+
+- id: tenant-id-from-request
+  title: A user of one customer organisation could read or change another organisation's records on {component} by changing the tenant ID sent in a header, subdomain, path or request body, if {component} trusts it instead of the logged-in session
+  kind: leak
+  applies:
+    component:
+      kind: [service]
+      exposure: [internet]
+      handles: [confidential, secret]
+      tenancy: [multi]
+  attack:
+    - Create two test organisations and log in as a user of the first.
+    - Find where requests say which organisation they're for, such as a header, subdomain, path or body field.
+    - Replace it with the second organisation's ID and see whether its records come back or can be changed.
+  defaults: {who: any-user, effort: trivial, impact: critical}
+  gives:
+    reads: ["{data}"]
+    changes: ["{data}"]
+  mitigations:
+    - id: tenant-from-session
+      title: Take the tenant ID only from the authenticated session or token, and check the user is a member of any tenant named in the URL
+      effect: eliminates
+      by_tech:
+        go: Put the tenant ID into the request context in the auth middleware, and have the data layer read it only from there, never from the request.
+        node: Set `req.tenantId` from the verified session in auth middleware, and never read a tenant from `req.headers`, `req.query` or `req.body` in handlers.
+        python: Resolve the tenant from `request.user` in middleware, and filter querysets through a model manager that refuses to run without a tenant.
+    - id: tenant-isolation-in-database
+      title: Enforce tenant isolation in the database as a second layer, with row-level security on a per-connection tenant setting, or a schema or database per tenant
+      effect: {effort: hard}
+    - id: cross-tenant-tests
+      title: Add automated tests that call every endpoint as a user of one tenant with another tenant's IDs, and expect a refusal
+      effect: detects
+  why_it_matters: >
+    A tenant mix-up leaks a whole customer's data, not one record. Tenant IDs
+    in headers and subdomains are handy for routing, so they quietly end up
+    trusted for access too.
+  refs: {stride: [information-disclosure, elevation-of-privilege], cwe: [CWE-639], owasp: ["API1:2023"]}
+
+- id: shared-cache-or-index
+  title: A user of one customer organisation could see another organisation's {data} through {component} if cached entries or search results are shared between tenants instead of being keyed and filtered by tenant
+  kind: leak
+  applies:
+    component:
+      kind: [cache, database, storage, gateway, third-party, other]
+      tech: [redis, memcached, valkey, varnish, cloudfront, fastly, elasticsearch, opensearch, solr, algolia, meilisearch, typesense, pinecone, weaviate, qdrant, milvus, chroma, pgvector]
+      handles: [confidential, secret]
+      tenancy: [multi]
+  attack:
+    - Create two test organisations with records that have similar names.
+    - As a user of the second, load a report or search for those names, then do the same as a user of the first.
+    - See whether the first user gets results or cached responses that belong to the second organisation.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: tenant-in-every-key-and-query
+      title: Include the tenant ID in every cache key, and filter every search and vector query by tenant on the server, through one shared helper
+      effect: eliminates
+      by_tech:
+        redis: Build keys with one helper that always starts with the tenant, such as `t:<tenant>:invoice:<id>`, so no call site can forget it.
+        valkey: Build keys with one helper that always starts with the tenant, such as `t:<tenant>:invoice:<id>`, so no call site can forget it.
+        elasticsearch: Add the tenant filter in a single query helper or use a filtered alias per tenant, and give large tenants their own index.
+        opensearch: Add the tenant filter in a single query helper or use a filtered alias per tenant, and give large tenants their own index.
+        algolia: Search only with secured API keys generated on the server per user, with the tenant filter embedded in the key.
+        pinecone: Use one namespace per tenant, chosen on the server from the session.
+    - id: private-cache-headers
+      title: "Send `Cache-Control: private, no-store` on responses with tenant or user data, so shared caches and CDNs never keep them"
+      effect: {effort: hard}
+      by_tech:
+        cloudfront: Use a cache policy that doesn't cache authenticated paths, or includes the auth header or cookie in the cache key.
+  why_it_matters: >
+    Caches and search indexes are often added for speed after the access
+    checks were written for the database. If they key on the query alone, two
+    tenants asking the same thing get the same answer.
+  refs: {stride: [information-disclosure], cwe: [CWE-524, CWE-639]}
+
+- id: tenant-unscoped-jobs
+  title: A customer could receive another customer's data in an export, report or email if background jobs run by {component} don't carry and enforce the tenant they run for
+  kind: leak
+  applies:
+    component:
+      kind: [service, queue]
+      exposure: [internal, unknown]
+      handles: [confidential, secret]
+      tenancy: [multi]
+  attack:
+    - Create two test organisations and start an export, report or scheduled email for each at about the same time.
+    - Look at the job's payload and see whether it names the tenant, or only record IDs or a query.
+    - Check the finished files and emails for anything from the other organisation, including after a retry or on a worker that just ran the other tenant's job.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  mitigations:
+    - id: tenant-in-job-payload
+      title: Put the tenant ID in every job, and have the worker set it as the only tenant scope before loading any data, refusing jobs without one
+      effect: eliminates
+      by_tech:
+        go: Carry the tenant ID in the job struct, build the context with it before any data access, and reject jobs where it's empty.
+        node: With BullMQ or similar, put `tenantId` in the job data and run the handler inside `AsyncLocalStorage.run()` so every query reads it from there.
+        python: With Celery, pass the tenant ID as a task argument, set it in a context variable at task start and clear it in a `task_postrun` handler.
+    - id: no-tenant-state-between-jobs
+      title: Don't keep tenant data in worker globals or in-memory caches between jobs
+      effect: {effort: hard}
+    - id: check-recipient-tenant
+      title: Check that whoever receives an export or email belongs to the tenant whose data it holds, right before sending
+      effect: {impact: medium}
+  why_it_matters: >
+    Jobs run outside the web request, so the middleware that scopes queries to
+    the logged-in tenant isn't there. Mistakes show up as one customer quietly
+    receiving another's data.
+  refs: {stride: [information-disclosure], cwe: [CWE-639]}
+
+- id: support-cross-tenant-access
+  title: A support or admin user could look at or change any customer's data through {component}'s internal tools without the customer agreeing or any record of what they looked at
+  kind: abuse
+  applies:
+    component:
+      kind: [service]
+      exposure: [internet]
+      handles: [confidential]
+      tenancy: [multi]
+  attack:
+    - Log in to the support or admin tools with a test support account.
+    - Open a test organisation you have no open ticket for, and view or edit its records.
+    - Check whether anything asked why, told the customer, or recorded which records you saw.
+  defaults: {who: insider, effort: trivial, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: just-in-time-support-access
+      title: Require a ticket or the customer's approval to open a tenant in support tools, and make that access expire after a few hours
+      effect: {who: privileged}
+    - id: audit-support-access
+      title: Record every view and change made through support tools, including which records were read, in an append-only log support staff can't edit, and show it to the customer
+      effect: detects
+    - id: least-privilege-support-roles
+      title: Give support read-only, field-limited views by default, and make editing and impersonating users separate permissions few people have
+      effect: {impact: medium}
+  why_it_matters: >
+    Support tools are built quickly to help customers and usually see
+    everything. Rogue insiders, stolen support accounts and tricked support
+    staff all reach customer data through them.
+  refs: {stride: [repudiation, information-disclosure], cwe: [CWE-778]}
+
+- id: noisy-neighbour
+  title: One customer could slow down or stop {component} for every other customer with heavy imports, exports or API scripts, if nothing limits how much of it a single tenant can use
+  kind: disrupt
+  applies:
+    component:
+      kind: [database, queue, cache]
+      handles: [confidential, secret]
+      tenancy: [multi]
+  attack:
+    - As one test organisation, start a large import, a large export and a script that calls the API as fast as it can.
+    - At the same time, use the app as a second test organisation.
+    - Watch whether the second organisation's pages and jobs slow down or time out.
+  defaults: {who: any-user, effort: trivial, impact: medium}
+  mitigations:
+    - id: per-tenant-rate-limits
+      title: Rate-limit API calls and concurrent jobs per tenant as well as per user and IP address, with limits that match the customer's plan
+      effect: {effort: hard}
+    - id: fair-queues-and-query-timeouts
+      title: Give each tenant a fair share of job workers, and set query timeouts so one tenant's heavy work can't hold {component}
+      effect: {impact: low}
+      by_tech:
+        postgres: Set `statement_timeout` on the app's database role, lower it for report and export queries, and cap connections per pool.
+        redis: Cap per-tenant key counts and avoid commands that scan the whole keyspace, such as `KEYS`, on shared instances.
+    - id: per-tenant-load-alerts
+      title: Measure load per tenant and alert when one tenant uses an unusual share
+      effect: detects
+  why_it_matters: >
+    In a shared system, one customer's legitimate heavy use is an outage for
+    everyone else. Limits per user or IP address don't help when the load comes
+    from one customer's many users and scripts.
+  refs: {stride: [denial-of-service], cwe: [CWE-770], owasp: ["API4:2023"]}
+
+- id: incomplete-tenant-deletion
+  title: Someone who later gets into {component}'s backups, replicas or copies could still read the data of customers who have left, such as {data}, if deleting an account or offboarding a tenant doesn't reach them
+  kind: leak
+  applies:
+    component:
+      kind: [database, storage]
+      stores: [confidential]
+      tenancy: [multi]
+  attack:
+    - Create a test organisation with recognisable records, then delete it the way a leaving customer would.
+    - Look for those records in backups, read replicas, search indexes, analytics exports, logs and stored files.
+    - Note every place they still turn up, and for how long.
+  defaults: {who: insider, effort: moderate, impact: medium}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: deletion-covers-every-copy
+      title: List every place customer data is copied (backups, search, caches, analytics, logs, file storage and vendors) and make the offboarding job delete or expire it in each
+      effect: {impact: low}
+    - id: backup-expiry-or-per-tenant-keys
+      title: Keep backups for a fixed period only, or encrypt each tenant's data with its own key and destroy the key at offboarding (crypto-shredding)
+      effect: {impact: low}
+      by_tech:
+        s3: Expire old object versions with S3 Lifecycle rules, and use per-tenant KMS keys if data must become unreadable straight away.
+        postgres: Keep point-in-time recovery windows short, and replay recorded deletions after any restore.
+    - id: offboarding-tests
+      title: Add a test that offboards a tenant and then checks each derived store holds nothing for it
+      effect: detects
+  why_it_matters: >
+    Deleting the main rows is easy; the copies are the hard part. Data a
+    customer was told is gone, then found in an old backup or index, is a
+    privacy breach and often a legal one.
+  refs: {stride: [information-disclosure]}

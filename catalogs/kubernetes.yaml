@@ -1,0 +1,190 @@
+# Workloads and clusters on Kubernetes (including EKS, GKE, AKS and OpenShift).
+
+- id: automounted-service-account-token
+  title: Someone who gets code running in {component} could use the Kubernetes service account token mounted into its pods to call the cluster's control API, even if {component} never needs it
+  kind: escalate
+  applies:
+    component:
+      kind: [service]
+      tech: [kubernetes, k8s, eks, gke, aks, openshift]
+      not_managed: true
+  attack:
+    - In a test cluster, open a shell in a {component} pod, as an attacker with a code execution bug would.
+    - Check whether a service account token is mounted at the standard path.
+    - See what that token is allowed to do in the cluster, such as reading secrets or creating pods.
+  defaults: {who: anyone, effort: hard, impact: high}
+  mitigations:
+    - id: no-automount-service-account-token
+      title: "Set `automountServiceAccountToken: false` on {component}'s pods unless it calls the Kubernetes API"
+      effect: eliminates
+      by_tech:
+        kubernetes: Set it on each namespace's default ServiceAccount too, and give the few workloads that need the API their own ServiceAccount.
+    - id: least-privilege-rbac
+      title: Give workloads that do need the API their own service account, with a Role limited to the resources and verbs they use and no cluster-wide bindings
+      effect: {impact: medium}
+      by_tech:
+        kubernetes: Check what a service account can do with `kubectl auth can-i --list --as=system:serviceaccount:<namespace>:<name>`.
+  why_it_matters: >
+    Kubernetes mounts a token into every pod unless told not to, and many
+    charts bind broad roles to it. A small bug in one app then becomes access
+    to the cluster's control API.
+  refs: {stride: [elevation-of-privilege], cwe: [CWE-250]}
+
+- id: privileged-container
+  title: Someone who gets code running in {component} could break out of its container onto the node, and reach the other pods there, if it runs as root, as privileged, or with access to the host
+  kind: escalate
+  applies:
+    component:
+      kind: [service, database, cache, queue]
+      tech: [kubernetes, k8s, eks, gke, aks, openshift]
+      not_managed: true
+  attack:
+    - In a test cluster, look at {component}'s pod spec and the image's default user.
+    - Check for running as root, privileged mode, added capabilities, host paths, or sharing the host's network or processes.
+    - Note what a process with those rights could reach on the node, such as other pods' files and credentials.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  mitigations:
+    - id: restricted-security-context
+      title: Run {component} as a non-root user with a read-only root filesystem, all capabilities dropped and privilege escalation turned off
+      effect: {effort: hard}
+      by_tech:
+        kubernetes: "In the securityContext, set `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, drop `ALL` capabilities and use the `RuntimeDefault` seccomp profile."
+        docker: Add a non-root `USER` to the Dockerfile so the image doesn't default to root.
+    - id: enforce-pod-security-standard
+      title: Enforce the restricted Pod Security Standard on application namespaces, so privileged pods are refused
+      effect: {effort: hard}
+      by_tech:
+        kubernetes: Label namespaces with `pod-security.kubernetes.io/enforce=restricted`, or enforce the same rules with Kyverno or Gatekeeper.
+  why_it_matters: >
+    Containers share the node's kernel. Root, privileged mode and host mounts
+    remove most of what stops one container's compromise from spreading, and
+    many images run as root by default.
+  refs: {stride: [elevation-of-privilege], cwe: [CWE-250]}
+
+- id: public-cluster-api
+  title: Anyone on the internet could try stolen credentials or known vulnerabilities against the Kubernetes control API for {component}, if it accepts connections from any address
+  kind: impersonate
+  applies:
+    component:
+      kind: [other, pipeline]
+      tech: [kubernetes, k8s, eks, gke, aks, openshift, helm, kubectl, argocd, flux]
+  attack:
+    - From outside your network, check whether the cluster's API endpoint answers.
+    - Note what it reveals without credentials, such as its version, and whether anonymous requests are allowed.
+    - Consider what a leaked kubeconfig or CI token, or an unpatched API server vulnerability, would give someone who can reach it.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  mitigations:
+    - id: private-cluster-endpoint
+      title: Make the cluster's API endpoint private, or allow only your VPN, office and CI addresses
+      effect: {who: insider}
+      by_tech:
+        eks: Turn on private endpoint access and turn off public access, or limit `publicAccessCidrs` to known ranges.
+        gke: Use a private endpoint, or turn on authorized networks with only known ranges.
+        aks: Use a private cluster, or set authorized IP ranges on the API server.
+    - id: cluster-sso-short-lived-access
+      title: Turn off anonymous access, and have people log in to the cluster through SSO with short-lived credentials instead of long-lived kubeconfig tokens
+      effect: {effort: hard}
+    - id: pull-based-deploys
+      title: Deploy with an agent inside the cluster that pulls changes (such as Argo CD or Flux), so CI never needs to reach the API
+      effect: {effort: hard}
+    - id: cluster-audit-logs
+      title: Turn on API server audit logs and alert on access from unknown addresses or identities
+      effect: detects
+      by_tech:
+        eks: Enable the `audit` and `authenticator` control plane log types.
+  why_it_matters: >
+    Managed clusters often start with a public API endpoint for convenience.
+    Then one leaked kubeconfig or CI token, or a new API server vulnerability,
+    is usable from anywhere.
+  refs: {stride: [spoofing, elevation-of-privilege], cwe: [CWE-284]}
+
+- id: secrets-in-configmaps-or-env
+  title: Someone who can read {component}'s manifests, ConfigMaps, logs or crash reports could get its passwords and API keys, if they're kept in ConfigMaps or plain environment variables
+  kind: leak
+  applies:
+    component:
+      kind: [service]
+      tech: [kubernetes, k8s, eks, gke, aks, openshift]
+  attack:
+    - In a test cluster, use a read-only developer account to list the ConfigMaps and pod specs in {component}'s namespace.
+    - Look for passwords, tokens or connection strings in them, and in the manifests and Helm values in your repository.
+    - Check whether error pages, debug endpoints or crash reports from {component} print its environment.
+  defaults: {who: insider, effort: trivial, impact: high}
+  mitigations:
+    - id: secrets-out-of-configmaps
+      title: Keep credentials in Kubernetes Secrets or an external secrets manager, never in ConfigMaps or committed manifests, and limit who can read Secrets with RBAC
+      effect: {who: privileged}
+      by_tech:
+        kubernetes: Pull from a secrets manager with External Secrets Operator or the Secrets Store CSI driver, and give developers read access to ConfigMaps but not Secrets.
+        eks: Sync from AWS Secrets Manager with External Secrets Operator or the Secrets Store CSI driver, using EKS Pod Identity for access.
+        gke: Use Secret Manager through its GKE add-on or External Secrets Operator, and turn on application-layer Secrets encryption.
+    - id: mount-secrets-as-files
+      title: Mount secrets as files instead of environment variables, so they don't end up in crash reports, debug output or child processes
+      effect: {effort: hard}
+    - id: scan-manifests-for-secrets
+      title: Scan manifests and Helm values for secrets in CI, and rotate any that are found
+      effect: detects
+  why_it_matters: >
+    ConfigMaps are meant to be readable by everyone who works on the app, and
+    environment variables get printed by debug pages and crash reporters.
+    Kubernetes Secrets are only base64-encoded, so who can read them is the real protection.
+  refs: {stride: [information-disclosure], cwe: [CWE-526, CWE-312]}
+
+- id: no-network-policies
+  title: Someone who breaks into any pod in the cluster could connect to {component} directly, because without network policies every pod can reach every other pod
+  kind: escalate
+  applies:
+    component:
+      kind: [service]
+      tech: [kubernetes, k8s, eks, gke, aks, openshift]
+      zone_network: [open]
+  attack:
+    - In a test cluster, start a throwaway pod in a different namespace.
+    - Try to connect to {component}'s service address and ports from it.
+    - Also try the databases and the cloud metadata address, and note everything that answers.
+  defaults: {who: insider, effort: moderate, impact: high}
+  mitigations:
+    - id: default-deny-network-policy
+      title: "Add a default-deny NetworkPolicy to every namespace, allow only the traffic {component} needs, then mark the zone `network: segmented`"
+      effect: {effort: hard}
+      by_tech:
+        kubernetes: Start with a policy that selects all pods and allows nothing, then add allow rules per app, remembering to allow DNS.
+        eks: Turn on network policy support in the VPC CNI (it's off by default), or run Calico or Cilium.
+        gke: Turn on network policy enforcement, or use GKE Dataplane V2, which enforces policies by default.
+        aks: Create the cluster with a network policy engine (Azure, Calico or Cilium), because without one policies are silently ignored.
+  why_it_matters: >
+    Kubernetes lets every pod talk to every other pod by default, and policies
+    are ignored unless the network plugin enforces them. One compromised pod can
+    then reach everything.
+  refs: {stride: [elevation-of-privilege], cwe: [CWE-923]}
+
+- id: unpinned-container-images
+  title: Someone who takes over an image tag {component} pulls, such as latest, could get their own code running in the cluster the next time a pod starts, because the tag isn't pinned to a digest
+  kind: tamper
+  applies:
+    component:
+      kind: [service, database, cache, queue]
+      tech: [kubernetes, k8s, eks, gke, aks, openshift]
+      not_managed: true
+  attack:
+    - Look at {component}'s manifests or Helm values and note image references that use a tag, such as latest or a version number, instead of a digest.
+    - Check who can push to those image repositories, including public upstream images.
+    - Note that a new image pushed under the same tag would run on the next restart or scale-up, with no change in your repository.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  gives:
+    controls: ["{component}"]
+  mitigations:
+    - id: pin-images-by-digest
+      title: Reference images by digest (image@sha256 followed by the hash), and let a bot such as Renovate propose digest updates as reviewed pull requests
+      effect: {effort: hard}
+      by_tech:
+        kubernetes: Add an admission policy (Kyverno or Gatekeeper) that rejects images without a digest or from registries you haven't approved.
+    - id: sign-and-verify-images
+      title: Sign your own images in CI, verify signatures when pods are admitted, and mirror third-party images into your own registry
+      effect: {effort: hard}
+      by_tech:
+        kubernetes: Sign with Cosign in CI and verify with Kyverno's `verifyImages` rule or the Sigstore policy-controller.
+  why_it_matters: >
+    A tag can be moved to a different image at any time. Without digests, what
+    runs in production can change without any commit, review or deploy.
+  refs: {stride: [tampering], cwe: [CWE-494, CWE-829]}
