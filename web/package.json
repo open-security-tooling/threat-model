@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck",
-    "contrast": "node scripts/contrast.mjs"
+    "contrast": "node scripts/contrast.mjs",
+    "security": "node scripts/security-checks.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.1",

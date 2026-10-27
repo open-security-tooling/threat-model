@@ -163,7 +163,7 @@ threats:
     impact_note: Every model the reviewer has open or autosaved could be read or changed.
     gives:
       reads: [user-models]
-    status: open
+    status: mitigated
     mitigations: [render-text-only, strict-csp]
 
   - id: model-exhausts-parser
@@ -209,7 +209,7 @@ threats:
     impact: high
     impact_note: Real risks could be hidden or marked accepted without a person deciding.
     status: open
-    mitigations: [agents-cannot-accept-risk, validated-writes]
+    mitigations: [agents-cannot-accept-risk, validated-writes, mcp-risk-lowering-guard, model-diff-in-check]
 
   - id: website-talks-to-local-server
     title: A website open in another tab could read or change the model through threat serve by sending requests to localhost
@@ -239,7 +239,7 @@ threats:
     effort: hard
     impact: critical
     status: open
-    mitigations: [few-pinned-dependencies, release-provenance]
+    mitigations: [few-pinned-dependencies, release-provenance, scan-dependencies]
     from: catalog:supply-chain/dependency-compromise
 
   - id: hosted-app-replaced
@@ -271,16 +271,66 @@ threats:
     status: open
     mitigations: [visible-autosave-controls]
 
+  - id: policy-relaxed-in-pull-request
+    title: A contributor could get a pull request past the security team's policy by relaxing .threat.yaml in the same pull request
+    kind: tamper
+    affects: [cli, pr-to-cli]
+    attack:
+      - Open a pull request that lowers a risk the policy would block.
+      - Edit .threat.yaml in the same pull request to turn the rule off.
+      - If threat check reads the policy from the branch, it passes.
+    who: anyone
+    effort: trivial
+    impact: high
+    impact_note: The security team's enforcement could be switched off by the people it applies to.
+    status: mitigated
+    mitigations: [policy-from-base-branch]
+
+  - id: formula-in-exported-register
+    title: Someone could run a spreadsheet formula on a reviewer's computer by putting it in a threat title that ends up in an exported risk register
+    kind: tamper
+    affects: [cli, web-app]
+    attack:
+      - Put a cell formula at the start of a threat title in a pull request.
+      - A reviewer exports the risk register as CSV and opens it in a spreadsheet.
+      - The spreadsheet evaluates the formula, which can fetch URLs or leak other cells.
+    who: anyone
+    effort: moderate
+    impact: medium
+    status: mitigated
+    mitigations: [neutralize-spreadsheet-formulas]
+
+  - id: tampered-binary-in-action
+    title: Someone who swaps the threat binary attached to a release could run their code in the CI of every repository that uses our GitHub Action
+    kind: tamper
+    affects: [release-pipeline]
+    attack:
+      - Get write access to the release, or intercept the download.
+      - Replace the binary with a modified one.
+      - Every workflow using the Action downloads and runs it with that workflow's token.
+    who: anyone
+    effort: hard
+    impact: critical
+    status: mitigated
+    mitigations: [action-verifies-binary, release-provenance]
+
 mitigations:
   - id: render-text-only
     title: Render all model text as plain text in the web app, never as HTML or Markdown
-    status: in-progress
+    status: done
     effect: eliminates
+    evidence:
+      - test: web/scripts/security-checks.mjs#dangerouslySetInnerHTML
+      - code: .github/workflows/ci.yml#npm run security
 
   - id: strict-csp
     title: Ship a strict Content-Security-Policy that blocks inline and third-party scripts and all outbound connections
-    status: in-progress
+    status: done
     effect: {effort: hard}
+    evidence:
+      - code: web/index.html#Content-Security-Policy
+      - test: web/scripts/security-checks.mjs#connect-src
+      - code: internal/serve/serve.go#frame-ancestors
 
   - id: strict-yaml-and-limits
     title: Reject anchors, aliases and tags, and limit file size, nesting depth and node count before decoding
@@ -336,22 +386,82 @@ mitigations:
 
   - id: few-pinned-dependencies
     title: Keep dependencies few and pinned, and wait a week before adopting new versions
-    status: in-progress
+    status: done
     effect: {effort: hard}
+    evidence:
+      - code: .github/dependabot.yml#cooldown
+      - code: web/.npmrc#save-exact
+      - code: go.mod#toolchain
 
   - id: release-provenance
     title: Publish checksums and build provenance attestations with every release
-    status: in-progress
+    status: done
     effect: {effort: hard}
     evidence:
-      - code: .github/workflows/release.yml#attest-build-provenance
+      - code: .github/workflows/release.yml#actions/attest
 
   - id: protected-branches-and-deploys
     title: Require signed commits and pull requests on main, and deploy Pages only from a protected environment
-    status: in-progress
+    status: done
     effect: {who: privileged}
+    evidence:
+      - code: .github/workflows/pages.yml#environment
+      - code: ".github/workflows/release.yml#environment: release"
+      - link: https://github.com/open-security-tooling/threat-model/rules
 
   - id: visible-autosave-controls
     title: Show when autosave is on, let users turn it off, and clear it with one click
-    status: in-progress
+    status: done
     effect: {impact: low}
+    evidence:
+      - code: web/src/lib/storage.ts#clearAll
+      - code: web/src/components/TopBar.tsx#autosaveStatus
+
+  - id: mcp-risk-lowering-guard
+    title: Refuse MCP edits that make the model look safer (deleting, dismissing, downgrading or overriding threats, recording reviews) unless a person allows them
+    status: done
+    effect: {impact: low}
+    evidence:
+      - code: internal/mcp/guard.go#needsPerson
+      - test: internal/mcp/mcp_test.go#TestGuardedOperations
+      - test: internal/mcp/guard_test.go#TestDismissingSeriousSuggestionNeedsPerson
+
+  - id: model-diff-in-check
+    title: Flag every risk-lowering change to the model in threat check --base, so it's visible in the pull request
+    status: done
+    effect: detects
+    evidence:
+      - code: internal/check/diff.go#diffModels
+      - test: internal/check/diff_test.go#TestCatchesGaming
+
+  - id: scan-dependencies
+    title: Review new dependencies and scan for known vulnerabilities on every pull request (dependency review, govulncheck, npm audit, CodeQL)
+    status: done
+    effect: detects
+    evidence:
+      - code: .github/workflows/dependency-review.yml#dependency-review-action
+      - code: .github/workflows/ci.yml#govulncheck
+      - code: .github/workflows/codeql.yml#security-extended
+
+  - id: policy-from-base-branch
+    title: Apply the policy file from the base branch, so a pull request can't relax the rules it's checked against
+    status: done
+    effect: eliminates
+    evidence:
+      - code: internal/check/check.go#basePolicy
+      - test: internal/check/diff_test.go#TestPolicyComesFromBase
+
+  - id: neutralize-spreadsheet-formulas
+    title: Prefix register cells that start with = + - @ tab or carriage return with a quote, so spreadsheets show them as text
+    status: done
+    effect: eliminates
+    evidence:
+      - test: internal/export/export_test.go#TestRegisterCSVNeutralizesFormulas
+      - code: web/src/lib/register.ts#formula
+
+  - id: action-verifies-binary
+    title: Verify the threat binary's build provenance in the GitHub Action before running it, and fail closed
+    status: done
+    effect: eliminates
+    evidence:
+      - code: action/action.yml#gh attestation verify

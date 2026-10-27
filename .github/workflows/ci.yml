@@ -68,4 +68,5 @@ jobs:
           npm audit --omit=dev --audit-level=high
           npm run typecheck
           npm run contrast
+          npm run security
           npm run build
