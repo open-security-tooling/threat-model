@@ -66,6 +66,7 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm audit --omit=dev --audit-level=high
+          npm audit signatures
           npm run typecheck
           npm run contrast
           npm run security

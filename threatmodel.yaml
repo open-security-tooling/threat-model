@@ -208,8 +208,12 @@ threats:
     effort: moderate
     impact: high
     impact_note: Real risks could be hidden or marked accepted without a person deciding.
-    status: open
+    status: accepted
     mitigations: [agents-cannot-accept-risk, validated-writes, mcp-risk-lowering-guard, model-diff-in-check]
+    accepted:
+      by: "@rahlenjakob"
+      reason: "Injection itself can't be prevented; MCP refuses risk-lowering edits without a person, and threat check --base flags any that reach a pull request."
+      until: 2027-01-31
 
   - id: website-talks-to-local-server
     title: A website open in another tab could read or change the model through threat serve by sending requests to localhost
@@ -239,7 +243,7 @@ threats:
     effort: hard
     impact: critical
     status: open
-    mitigations: [few-pinned-dependencies, release-provenance, scan-dependencies]
+    mitigations: [few-pinned-dependencies, release-provenance, scan-dependencies, verify-registry-signatures, no-install-scripts]
     from: catalog:supply-chain/dependency-compromise
 
   - id: hosted-app-replaced
@@ -255,8 +259,12 @@ threats:
     impact: critical
     gives:
       reads: [user-models]
-    status: open
+    status: accepted
     mitigations: [protected-branches-and-deploys, strict-csp]
+    accepted:
+      by: "@rahlenjakob"
+      reason: "Needs org admin access (2FA, hardware-key signing, protected tags and release environment); the CSP blocks outbound connections, and sensitive models can use threat serve from a verified binary."
+      until: 2027-01-31
 
   - id: autosave-on-shared-computer
     title: Someone using the same computer later could read a model the web app autosaved in the browser
@@ -268,8 +276,12 @@ threats:
     who: physical
     effort: trivial
     impact: medium
-    status: open
+    status: accepted
     mitigations: [visible-autosave-controls]
+    accepted:
+      by: "@rahlenjakob"
+      reason: "Needs the device in hand; the app shows when autosave is on, and it can be turned off and cleared in one click."
+      until: 2027-04-30
 
   - id: policy-relaxed-in-pull-request
     title: A contributor could get a pull request past the security team's policy by relaxing .threat.yaml in the same pull request
@@ -465,3 +477,18 @@ mitigations:
     effect: eliminates
     evidence:
       - code: action/action.yml#gh attestation verify
+
+  - id: verify-registry-signatures
+    title: Verify npm registry signatures and provenance of every installed package in CI
+    status: done
+    effect: detects
+    evidence:
+      - code: .github/workflows/ci.yml#npm audit signatures
+
+  - id: no-install-scripts
+    title: Install npm packages with install scripts disabled in CI and release builds
+    status: done
+    effect: {effort: hard}
+    evidence:
+      - code: .github/workflows/ci.yml#--ignore-scripts
+      - code: Makefile#--ignore-scripts
