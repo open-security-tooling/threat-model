@@ -1,0 +1,187 @@
+# Webhooks and third-party APIs, in both directions.
+
+- id: unsigned-inbound-webhook
+  title: Anyone could send {to} fake events that look like they come from {from}, such as a payment that never happened, if its webhook endpoint doesn't verify each request's signature
+  kind: impersonate
+  applies:
+    flow:
+      from_kind: [third-party]
+      to_kind: [service]
+  attack:
+    - Find the webhook address, for example on the vendor's setup page, in logs, or at a guessable path.
+    - Send it a request shaped like a real event from {from}, such as a payment succeeding, for a test account.
+    - See whether {to} acts on it without checking that {from} really sent it.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  mitigations:
+    - id: verify-webhook-signatures
+      title: Verify every webhook's signature over the raw request body with the vendor's library or documented method, compare in constant time, and reject anything unsigned
+      effect: eliminates
+      by_tech:
+        go: Read the raw body before decoding JSON, compute the HMAC with `crypto/hmac` and compare with `hmac.Equal`. For Stripe, use `webhook.ConstructEvent`.
+        node: Verify against the raw body (for example `express.raw()` on that route), not re-serialised JSON, and compare with `crypto.timingSafeEqual`. For Stripe, use `stripe.webhooks.constructEvent`.
+        python: Verify against `request.body` (Django) or `request.get_data()` (Flask) with `hmac.compare_digest`. For Stripe, use `stripe.Webhook.construct_event`.
+    - id: refetch-webhook-object
+      title: For events that move money or change access, fetch the object from {from}'s API by its ID before acting, instead of trusting the payload
+      effect: eliminates
+    - id: per-environment-webhook-secrets
+      title: Keep webhook signing secrets in a secrets manager, separate for each environment, and rotate them if they might have leaked
+      effect: {effort: hard}
+  why_it_matters: >
+    Webhook endpoints are public URLs that accept requests without a login,
+    so the signature is the only proof of who sent them. Skipping it still
+    works perfectly in testing.
+  refs: {stride: [spoofing], cwe: [CWE-345, CWE-347]}
+
+- id: webhook-replay
+  title: Someone who captures one genuine webhook from {from} could send it to {to} again and again, such as to credit a payment twice, if {to} doesn't check its timestamp and skip events it has already handled
+  kind: tamper
+  applies:
+    flow:
+      from_kind: [third-party]
+      to_kind: [service]
+  attack:
+    - Capture a real, signed webhook in a test environment, for example from logs, a debugging proxy or the vendor's dashboard.
+    - Send the identical request to {to} again, minutes or days later.
+    - See whether {to} processes it a second time.
+  defaults: {who: anyone, effort: hard, impact: medium}
+  mitigations:
+    - id: check-webhook-timestamp
+      title: Reject webhooks whose signed timestamp is more than a few minutes old
+      effect: {effort: hard}
+      by_tech:
+        go: Include the timestamp in the signed string and reject it outside a five-minute window. Stripe's `webhook.ConstructEvent` already does this.
+    - id: idempotent-event-handling
+      title: Store each event ID with a unique constraint and skip events already processed, so retries and replays have no extra effect
+      effect: eliminates
+      by_tech:
+        go: Insert the event ID into a table with a unique index in the same transaction as the side effect, and treat a conflict as already done.
+        node: Insert the event ID with a unique index in the same transaction as the side effect, and treat a duplicate-key error as already done.
+        python: Insert the event ID with a unique index inside the same `transaction.atomic()` block as the side effect, and treat an `IntegrityError` as already done.
+  why_it_matters: >
+    A valid signature only proves the vendor sent the event once. Vendors
+    also retry deliveries, so without deduplication even honest duplicates
+    charge, credit or ship twice.
+  refs: {stride: [tampering, spoofing], cwe: [CWE-294]}
+
+- id: outbound-webhook-ssrf
+  title: A customer could make {component} send requests into our internal network by registering a webhook address that points there, or that redirects or re-resolves there after it was checked, through server-side request forgery (SSRF)
+  kind: leak
+  applies:
+    - component:
+        kind: [service]
+        tech: [outbound-webhooks, webhook-delivery, webhook-sender, svix]
+    - component:
+        kind: [service]
+        features: [outbound-webhooks]
+  attack:
+    - Register a webhook in a test account with an address you control, and note which requests arrive and from which address.
+    - Change it to an internal hostname, or to a host you control that answers with a redirect or later resolves to a private address.
+    - See whether {component} delivers to it, and whether the delivery log shows you the response.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  mitigations:
+    - id: check-address-at-connect-time
+      title: At delivery time, not only when the webhook is saved, resolve the hostname, refuse private, loopback and link-local addresses, connect to the exact address you checked, and don't follow redirects
+      effect: eliminates
+      by_tech:
+        go: Check the address in a `net.Dialer` `Control` function, so the check runs on the IP actually dialled, and set `CheckRedirect` to refuse redirects.
+        node: "Give the HTTP agent a custom `lookup` that rejects private addresses, and turn off redirects (`redirect: 'manual'` in fetch, `maxRedirects: 0` in axios)."
+        python: Check the resolved address in a custom transport adapter before connecting, and pass `allow_redirects=False`.
+    - id: isolated-webhook-workers
+      title: Send webhooks from workers in their own network that can reach only the internet, or through an egress proxy that blocks internal ranges
+      effect: {impact: low}
+      by_tech:
+        kubernetes: Run delivery workers in their own namespace with a NetworkPolicy that allows egress to the internet but not to cluster or VPC ranges.
+        aws: Run delivery workers in a separate subnet whose security group and route table allow only outbound internet traffic through a NAT gateway.
+    - id: minimal-delivery-logs
+      title: Show customers only the status code and timing of each delivery, not response bodies or internal error messages
+      effect: {impact: medium}
+  why_it_matters: >
+    The address is often checked when the webhook is saved but resolved later,
+    at delivery. Redirects and DNS changes slip past that check, and delivery
+    logs can show the attacker what came back.
+  refs: {stride: [information-disclosure], cwe: [CWE-918], owasp: ["API7:2023"]}
+
+- id: over-scoped-vendor-key
+  title: Someone who steals the key {from} uses for {to} could do far more with {to} than {from} ever needs, such as issuing refunds or exporting every customer record, if the key isn't limited to the actions {from} uses
+  kind: escalate
+  applies:
+    flow:
+      from_kind: [service, pipeline]
+      to_kind: [third-party]
+      auth: [api-key, bearer-token]
+  attack:
+    - List the actions {from} actually calls on {to}.
+    - In {to}'s dashboard or docs, check what else the key it uses is allowed to do.
+    - Assume the key leaks through a log, a config file or a compromised dependency, and list what someone could do with it.
+  defaults: {who: anyone, effort: hard, impact: high}
+  mitigations:
+    - id: restricted-vendor-keys
+      title: Use a restricted key with only the permissions {from} needs, and a separate key for each service and environment
+      effect: {impact: medium}
+      by_tech:
+        stripe: Create a restricted key with access to only the resources the service uses, instead of the account's secret key.
+        sendgrid: Create an API key with only the Mail Send permission for services that just send email.
+        twilio: Give each service its own API key on a subaccount instead of using the main account's auth token.
+        github: Use a fine-grained token or a GitHub App limited to the repositories and permissions it needs.
+    - id: vendor-key-source-allowlist
+      title: Limit where the key works from, such as an allowlist of your outbound IP addresses, if {to} supports it
+      effect: {effort: hard}
+  why_it_matters: >
+    A vendor's default key can usually do everything the account can. Nobody
+    notices until it leaks, and then the damage is the whole vendor account.
+  refs: {stride: [elevation-of-privilege], cwe: [CWE-250]}
+
+- id: trusted-vendor-responses
+  title: Someone who compromises or impersonates {to} could get {from} to store, show or act on harmful data, if {from} uses what {to} sends back without checking it
+  kind: tamper
+  applies:
+    flow:
+      from_kind: [service]
+      to_kind: [third-party]
+  attack:
+    - In a test environment, point {from} at a stub that pretends to be {to}.
+    - Return responses with unexpected types, huge or missing fields, markup in text fields, or links where plain names should be.
+    - See what {from} stores, shows to users, or does with them.
+  defaults: {who: anyone, effort: hard, impact: medium}
+  mitigations:
+    - id: validate-vendor-responses
+      title: Parse responses from {to} into strict types with size limits, check required fields and ranges, and escape them like user input wherever they're shown
+      effect: {impact: low}
+    - id: no-vendor-supplied-urls
+      title: Don't fetch URLs or follow redirects from {to}'s responses unless they're on its documented domains
+      effect: {impact: low}
+    - id: verified-tls-to-vendor
+      title: Call {to} only over HTTPS with certificate checks on, at its documented hostname
+      effect: {effort: hard}
+  why_it_matters: >
+    Data from a vendor feels internal, so it skips the validation user input
+    gets. If the vendor is breached or a response is spoofed, that data goes
+    straight into your database and your users' browsers.
+  refs: {stride: [tampering], cwe: [CWE-20], owasp: ["API10:2023"]}
+
+- id: vendor-outage-cascade
+  title: An outage or slowdown at {to} could take {from} down with it, if calls to {to} have no timeout, retry limit or fallback
+  kind: disrupt
+  applies:
+    flow:
+      from_kind: [service]
+      to_kind: [third-party]
+  attack:
+    - In a test environment, make the stub for {to} respond very slowly, or not at all.
+    - Send normal traffic to {from}.
+    - Watch whether requests pile up, connections or workers run out, and unrelated features stop working too.
+  defaults: {who: anyone, effort: hard, impact: medium}
+  mitigations:
+    - id: timeouts-on-vendor-calls
+      title: Set a connect timeout and a total timeout on every call to {to}, shorter than your own request timeout
+      effect: {impact: low}
+    - id: bounded-retries-and-circuit-breaker
+      title: Retry only safe-to-repeat calls, with backoff, jitter and a cap, and stop calling {to} for a while after repeated failures (a circuit breaker)
+      effect: {impact: low}
+    - id: degrade-without-vendor
+      title: Move calls to {to} that can wait onto a queue, and decide what users see while it's down, such as accepting an order and confirming payment later
+      effect: {impact: low}
+  why_it_matters: >
+    Many default HTTP clients wait forever. A vendor that hangs instead of
+    failing ties up every worker, so one slow dependency becomes your outage.
+  refs: {stride: [denial-of-service], cwe: [CWE-1088]}

@@ -1,0 +1,177 @@
+# Mobile apps on iOS and Android, native or cross-platform.
+
+- id: secrets-in-app-bundle
+  title: Anyone who downloads {component} could pull API keys and other secrets out of the app package and use them against your backend or vendors, if secrets are built into it
+  kind: leak
+  applies:
+    component:
+      kind: [client]
+      tech: [ios, android, react-native, flutter, mobile, expo, ionic, capacitor, cordova, xamarin, maui]
+  attack:
+    - Download the app to a test device or emulator and unpack it with a standard app inspection tool.
+    - Search its code, config files and resources for keys, tokens and service addresses.
+    - In a test environment, check what a key you found allows by calling its API from your own machine.
+  defaults: {who: anyone, effort: trivial, impact: high}
+  mitigations:
+    - id: no-secrets-in-app
+      title: Keep secret keys on your backend, and have the app call your backend, which calls the vendor with the key
+      effect: eliminates
+    - id: restricted-public-keys
+      title: Ship only keys meant to be public (publishable or client keys), restricted to your app's identity and to the actions it needs
+      effect: {impact: low}
+      by_tech:
+        android: Restrict Google API keys to your package name and signing certificate fingerprint in the Cloud console.
+        ios: Restrict Google API keys to your bundle ID, and protect Firebase services with App Check.
+    - id: app-attestation
+      title: Use platform app attestation so your backend can tell real installs of the app from scripts
+      effect: {effort: hard}
+      by_tech:
+        ios: Use App Attest from the DeviceCheck framework.
+        android: Use the Play Integrity API.
+        react-native: Use Firebase App Check or a maintained module for App Attest and Play Integrity.
+        flutter: Use the `firebase_app_check` plugin, or a maintained plugin for App Attest and Play Integrity.
+    - id: scan-app-package-for-secrets
+      title: Scan the built app package for secrets in CI before every release
+      effect: detects
+  why_it_matters: >
+    Everything in an app package can be read by anyone who downloads it, and
+    obfuscation only slows that down. Keys pulled from apps are a common way into
+    backends and paid APIs.
+  refs: {stride: [information-disclosure], cwe: [CWE-798], owasp: ["M1:2024"]}
+
+- id: deep-link-hijack
+  title: Another app on the user's phone could catch sign-in links, payment callbacks or other deep links meant for {component}, or send it crafted ones, if it uses custom URL schemes or trusts whatever a link asks it to do
+  kind: impersonate
+  applies:
+    component:
+      kind: [client]
+      tech: [ios, android, react-native, flutter, mobile, expo, ionic, capacitor, cordova, xamarin, maui]
+  attack:
+    - List the custom URL schemes and deep links {component} registers, from its manifest or app configuration.
+    - On a test device, install a second test app that registers the same custom scheme, then start a sign-in or payment that returns to {component}.
+    - See which app receives the link, and separately open deep links that send {component} to unexpected screens or with unexpected parameters.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  gives:
+    access: any-user
+  mitigations:
+    - id: verified-app-links
+      title: Use verified links on your own domain (Android App Links and iOS Universal Links) for sign-in and payment callbacks, instead of custom URL schemes
+      effect: eliminates
+      by_tech:
+        android: Add intent filters with `android:autoVerify="true"` and publish `assetlinks.json` on your domain.
+        ios: Use Associated Domains with an `apple-app-site-association` file on your domain, and keep tokens out of custom-scheme links.
+    - id: pkce-for-app-sign-in
+      title: Use PKCE for sign-in from the app, so a stolen sign-in code is useless without the secret only {component} holds
+      effect: {impact: low}
+    - id: validate-deep-links
+      title: Treat every deep link as untrusted input, allowlist the screens it can open, and ask the user to confirm any action it triggers
+      effect: {impact: low}
+      by_tech:
+        android: Don't export activities that don't need to be (`android:exported="false"`), and validate every intent extra.
+  why_it_matters: >
+    Any app can register the same custom URL scheme, and the phone won't tell
+    the user which one got the link. Sign-in codes and payment results sent that
+    way can land in the wrong app.
+  refs: {stride: [spoofing], cwe: [CWE-939]}
+
+- id: insecure-local-storage
+  title: Someone with the phone, its backups or a foothold on it could read the tokens and personal data {component} keeps on the device, if they're stored outside the platform's protected storage
+  kind: leak
+  applies:
+    component:
+      kind: [client]
+      tech: [ios, android, react-native, flutter, mobile, expo, ionic, capacitor, cordova, xamarin, maui]
+  attack:
+    - Use {component} on a test device, then look at what it wrote to its files, preferences, databases, caches and logs.
+    - Make an unencrypted backup of the same test device and look for the same data in it.
+    - Note any tokens, passwords or personal data stored in plain text.
+  defaults: {who: physical, effort: moderate, impact: high}
+  mitigations:
+    - id: keychain-and-keystore
+      title: Keep tokens and keys only in the iOS Keychain or Android Keystore, and other sensitive data in encrypted storage
+      effect: {effort: hard}
+      by_tech:
+        ios: Store tokens in the Keychain with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, and use Data Protection for files.
+        android: Encrypt with keys held in the Android Keystore, and don't keep tokens in plain SharedPreferences.
+        react-native: Use `react-native-keychain` or Expo SecureStore for tokens, never AsyncStorage.
+        expo: Use `expo-secure-store` for tokens, never AsyncStorage.
+        flutter: Use `flutter_secure_storage` for tokens, never `shared_preferences`.
+    - id: minimise-device-data
+      title: Store as little as possible on the device, exclude sensitive files from backups, and wipe it all at logout
+      effect: {impact: low}
+      by_tech:
+        android: Set `android:allowBackup="false"`, or data extraction rules that exclude sensitive files.
+        ios: Mark sensitive files with `isExcludedFromBackup`.
+    - id: no-sensitive-data-in-logs-or-snapshots
+      title: Keep tokens and personal data out of device logs, app-switcher screenshots and the keyboard's learned words
+      effect: {impact: low}
+  why_it_matters: >
+    App sandboxes stop other apps on a healthy phone, not backups, rooted
+    devices or forensic tools. Plain preference files and app databases are the
+    first place anyone looks.
+  refs: {stride: [information-disclosure], cwe: [CWE-922, CWE-312], owasp: ["M9:2024"]}
+
+- id: client-only-authorization
+  title: A user could get paid features or see data they aren't allowed to by calling {component}'s backend directly, if access rules are checked only inside the app
+  kind: escalate
+  applies:
+    component:
+      kind: [client]
+      tech: [ios, android, react-native, flutter, mobile, expo, ionic, capacitor, cordova, xamarin, maui]
+  attack:
+    - On a test device, send the app's traffic through an intercepting proxy you control and use the app normally.
+    - Note requests the app only sends for premium or admin users, and responses that hold data the screens hide.
+    - Replay those requests from a free or regular test account and see whether the backend allows them.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  gives:
+    access: privileged
+  mitigations:
+    - id: server-side-authorization
+      title: Check every permission, plan limit and ownership rule on the backend for every request, as if the app didn't exist
+      effect: eliminates
+    - id: verify-purchases-server-side
+      title: Verify in-app purchases and subscriptions on the backend with the app store's server APIs, never from what the app reports
+      effect: {effort: hard}
+      by_tech:
+        ios: Verify transactions with the App Store Server API and handle App Store Server Notifications.
+        android: Verify purchases with the Google Play Developer API and Real-time developer notifications.
+    - id: minimal-api-responses
+      title: Send the app only the fields each screen needs, instead of whole records it then hides
+      effect: {impact: medium}
+  why_it_matters: >
+    Apps feel like a closed box, but their traffic is easy to watch and replay.
+    Any rule enforced only in the app is just a suggestion.
+  refs: {stride: [elevation-of-privilege], cwe: [CWE-602], owasp: ["M3:2024"]}
+
+- id: missing-certificate-checks
+  title: Someone on the same Wi-Fi or network could read and change {component}'s traffic, including login tokens, if the app accepts any certificate or doesn't pin certificates for its most sensitive calls
+  kind: leak
+  applies:
+    component:
+      kind: [client]
+      tech: [ios, android, react-native, flutter, mobile, expo, ionic, capacitor, cordova, xamarin, maui]
+  attack:
+    - On a test device, send the app's traffic through an intercepting proxy whose certificate the device doesn't trust.
+    - See whether the app still connects, which means it doesn't check certificates.
+    - Then trust the proxy's certificate on the device, and see whether sign-in and payment calls still go through.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  mitigations:
+    - id: default-certificate-checks
+      title: Use the platform's default certificate checks, and remove any code or config that trusts all certificates or skips hostname checks, including in debug builds
+      effect: eliminates
+      by_tech:
+        android: Remove custom `TrustManager` and `HostnameVerifier` overrides, and don't allow user-added certificates or cleartext traffic in the network security config.
+        ios: Remove `URLSession` delegate code that accepts any server certificate, and keep App Transport Security on.
+        flutter: Remove any `badCertificateCallback` that returns true.
+        react-native: Check native modules and HTTP libraries for options that turn off certificate checks, especially ones added for debugging.
+    - id: pin-sensitive-calls
+      title: Pin your backend's public keys, with a backup key, for sign-in and payment calls, and plan how you'll rotate them
+      effect: {effort: hard}
+      by_tech:
+        android: Declare pins with a backup and an expiry date in `network_security_config.xml`.
+        ios: Declare pins with `NSPinnedDomains` in Info.plist.
+  why_it_matters: >
+    Certificate checks get turned off during development to make a test proxy
+    work, and the change ships. Pinning the most sensitive calls also protects
+    against wrongly issued and user-installed certificates.
+  refs: {stride: [information-disclosure, tampering], cwe: [CWE-295], owasp: ["M5:2024"]}

@@ -1,0 +1,161 @@
+# Databases, logs and backups.
+
+- id: database-reachable-from-internet
+  title: Anyone on the internet could try to log in to {component} directly, because it accepts connections from outside your network
+  kind: leak
+  applies:
+    component:
+      kind: [database, cache, queue]
+      exposure: [internet]
+  attack:
+    - Scan for the database port on your public addresses.
+    - Try default, weak or leaked credentials.
+    - Read or change the data once in.
+  defaults: {who: anyone, effort: moderate, impact: critical}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: private-network-only
+      title: Put the database on a private network and allow connections only from the services that need it
+      effect: eliminates
+  why_it_matters: >
+    Databases exposed to the internet are found by scanners within hours.
+    The password is then the only thing in the way.
+  refs: {cwe: [CWE-668]}
+
+- id: sensitive-data-in-logs
+  title: Someone with access to logs could read {data} if {component} writes it into log messages
+  kind: leak
+  applies:
+    component:
+      kind: [service]
+      handles: [confidential, secret]
+  attack:
+    - Get read access to the log system, which many more people have than the database.
+    - Search the logs for tokens, personal data or request bodies.
+  defaults: {who: insider, effort: trivial, impact: medium}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: redact-logs
+      title: Log IDs instead of payloads, and redact known sensitive fields before they reach the logger
+      effect: {impact: low}
+  why_it_matters: >
+    Logs are copied to more places and kept longer than the data they
+    describe, and they're rarely access-controlled as tightly.
+  refs: {cwe: [CWE-532]}
+
+- id: readable-backups
+  title: Someone who gets hold of a backup of {component} could read all the {data} in it
+  kind: leak
+  applies:
+    component:
+      kind: [database, storage]
+      stores: [confidential, secret]
+  attack:
+    - Find where backups or snapshots are kept, such as a bucket, a shared snapshot or a developer's machine.
+    - Copy one.
+    - Restore it somewhere else and read everything.
+  defaults: {who: insider, effort: moderate, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: encrypt-and-restrict-backups
+      title: Encrypt backups with keys only the restore process can use, and restrict who can access or share snapshots
+      effect: {who: privileged}
+  why_it_matters: >
+    Backups contain everything at once and are often protected less
+    carefully than the live database.
+  refs: {cwe: [CWE-311]}
+
+- id: no-audit-trail
+  title: Someone with access to {component} could change {data} and leave no record of who did it
+  kind: cover-tracks
+  applies:
+    component:
+      kind: [service]
+      stores: [confidential, secret]
+  attack:
+    - Use legitimate access, such as an admin or support account.
+    - Change records.
+    - Nothing records who made the change or when.
+  defaults: {who: insider, effort: trivial, impact: medium}
+  mitigations:
+    - id: append-only-audit-log
+      title: Record who changed what and when in an append-only audit log
+      effect: detects
+  why_it_matters: >
+    Without an audit trail you can't investigate an incident, prove what
+    happened, or even notice that something did.
+  refs: {stride: [repudiation], cwe: [CWE-778]}
+
+- id: bulk-export-abuse
+  title: A logged-in user could download far more {data} than they should by paging through or exporting everything from {component}
+  kind: abuse
+  applies:
+    component:
+      kind: [service]
+      exposure: [internet]
+      handles: [confidential]
+  attack:
+    - Find a list, search or export endpoint.
+    - Script it to fetch page after page.
+    - Collect data at a scale no normal user would.
+  defaults: {who: any-user, effort: trivial, impact: medium}
+  mitigations:
+    - id: export-limits-and-alerts
+      title: Limit page sizes and export volume per user, and alert on unusual volumes
+      effect: {impact: low}
+  why_it_matters: >
+    Every request is allowed, so nothing looks wrong, but the total is a
+    data leak.
+  refs: {cwe: [CWE-770]}
+
+- id: unencrypted-at-rest
+  title: Someone who gets hold of {component}'s disks, snapshots or files could read all the {data} in them if it isn't encrypted at rest
+  kind: leak
+  applies:
+    component:
+      kind: [database, storage, cache, queue]
+      stores: [confidential, secret]
+      at_rest: [unencrypted, unknown]
+  attack:
+    - Get a copy of the underlying disk, volume snapshot or files, for example through a shared snapshot or a decommissioned drive.
+    - Attach or open it somewhere else.
+    - Read the data directly, without any database permissions.
+  defaults: {who: insider, effort: moderate, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: encrypt-at-rest
+      title: "Turn on encryption at rest with managed keys, and restrict who can use the keys, then mark it `encrypted_at_rest: true`"
+      effect: {who: privileged}
+      by_tech:
+        aws-rds: Enable storage encryption (it must be set when the instance is created; migrate via an encrypted snapshot).
+        s3: Enforce default encryption with SSE-KMS and a bucket policy that denies unencrypted uploads.
+  why_it_matters: >
+    Access controls only apply inside the system. A copied disk or snapshot
+    goes around all of them unless the data on it is encrypted.
+  refs: {cwe: [CWE-311]}
+
+- id: unmonitored-sensitive-component
+  title: Someone could break into {component} and take {data} without anyone noticing if security events there aren't logged and alerted on
+  kind: cover-tracks
+  applies:
+    component:
+      kind: [service, database, storage, identity]
+      stores: [confidential, secret]
+      monitoring: [off, unknown]
+  attack:
+    - Get in by any means.
+    - Read or copy data slowly, staying under any obvious limits.
+    - Leave, with nothing recorded that anyone looks at.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  mitigations:
+    - id: monitor-security-events
+      title: "Log sign-ins, permission changes and bulk data access, alert on unusual patterns, then mark it `monitored: true`"
+      effect: detects
+  why_it_matters: >
+    Most breaches are found months later, by someone else. Detection is
+    what turns a breach into an incident you can contain.
+  refs: {stride: [repudiation], cwe: [CWE-778]}

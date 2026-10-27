@@ -1,0 +1,541 @@
+# Web apps and APIs. Roughly OWASP Top 10 and API Top 10 territory, in plain words.
+
+- id: object-level-access
+  title: A logged-in user could read or change other users' {data} by changing an ID in a request to {component}
+  kind: leak
+  applies:
+    component:
+      kind: [service]
+      exposure: [internet]
+      handles: [confidential, secret]
+  attack:
+    - Sign up and create something of your own, such as one of the {data}.
+    - Note the ID it has in the URL or request.
+    - Repeat the request with a different ID and see whether someone else's record comes back.
+  defaults: {who: any-user, effort: trivial, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: check-object-owner
+      title: Check that each record belongs to the caller before returning or changing it
+      effect: eliminates
+      by_tech:
+        go: Load records scoped to the caller, e.g. `WHERE id = $1 AND account_id = $2`, never by ID alone.
+        node: "Scope queries by the authenticated account, e.g. `findOne({ id, accountId: req.user.accountId })`."
+        python: Filter by the current user in the query, e.g. `Invoice.objects.get(id=id, account=request.user.account)`.
+    - id: unguessable-ids
+      title: Use random IDs (UUIDv4) instead of sequential numbers
+      effect: {effort: hard}
+  why_it_matters: >
+    This is the most common way APIs leak data. It's easy to miss in code
+    review because the endpoint works perfectly for the honest user.
+  refs: {stride: [information-disclosure], cwe: [CWE-639], owasp: ["API1:2023"]}
+
+- id: function-level-access
+  title: A regular user could use admin-only features of {component} by calling the admin endpoints directly
+  kind: escalate
+  applies:
+    component:
+      kind: [service]
+      exposure: [internet]
+  attack:
+    - Find the admin endpoints, for example in the frontend's JavaScript or API docs.
+    - Call one while logged in as a normal user.
+    - See whether it works because only the UI hides the button.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  gives:
+    access: privileged
+  mitigations:
+    - id: server-side-role-checks
+      title: Check the caller's role on the server for every admin endpoint, not just in the UI
+      effect: eliminates
+      by_tech:
+        go: Wrap admin routes in middleware that checks the role, and add a test that calls each as a normal user.
+        node: Put a role-checking middleware on the admin router itself, e.g. `router.use(requireRole("admin"))`.
+    - id: deny-by-default-routes
+      title: Make new routes require an explicit permission, so forgetting one fails closed
+      effect: {effort: hard}
+  why_it_matters: >
+    Hiding a button isn't access control. Admin endpoints are often added
+    in a hurry and tested only through the admin UI.
+  refs: {stride: [elevation-of-privilege], cwe: [CWE-285], owasp: ["API5:2023"]}
+
+- id: credential-stuffing
+  title: Anyone on the internet could take over accounts on {to} by trying email and password pairs leaked from other sites
+  kind: impersonate
+  applies:
+    flow:
+      from_kind: [client]
+      to_kind: [service, identity]
+      auth: [session-cookie, bearer-token]
+  attack:
+    - Get one of the large public lists of leaked email and password pairs.
+    - Try each pair against the login endpoint with a script.
+    - Log in to every account whose owner reused a password.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  gives:
+    access: any-user
+  mitigations:
+    - id: rate-limit-login
+      title: Rate-limit login attempts per account and per IP address
+      effect: {effort: hard}
+    - id: block-breached-passwords
+      title: Reject passwords that appear in known breach lists at signup and password change
+      effect: {effort: hard}
+    - id: offer-mfa
+      title: Offer passkeys or an authenticator app, and require one for sensitive accounts
+      effect: eliminates
+    - id: bot-protection
+      title: Turn on bot detection or CAPTCHA challenges for logins at the gateway after repeated failures
+      effect: {effort: hard}
+  why_it_matters: >
+    People reuse passwords, and the lists are free. A login form with no
+    rate limit is an open invitation for automated guessing.
+  refs: {stride: [spoofing], cwe: [CWE-307], owasp: ["API2:2023"]}
+
+- id: session-cookie-theft
+  title: Someone could take over a user's session on {to} by stealing their session cookie
+  kind: impersonate
+  applies:
+    flow:
+      from_kind: [client]
+      auth: [session-cookie]
+  attack:
+    - Get the cookie through a script injected into the page, a shared computer, or an unencrypted connection.
+    - Send requests to {to} with that cookie.
+    - Act as the user until the session expires.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  gives:
+    access: any-user
+  mitigations:
+    - id: harden-session-cookie
+      title: Set session cookies HttpOnly, Secure and SameSite=Lax (or Strict)
+      effect: {effort: hard}
+    - id: short-sessions
+      title: Expire sessions after inactivity, rotate them at login, and let users sign out other devices
+      effect: {impact: medium}
+  why_it_matters: >
+    A session cookie is as good as a password while it's valid. Missing
+    cookie flags turn small bugs elsewhere into account takeovers.
+  refs: {stride: [spoofing], cwe: [CWE-1004, CWE-614]}
+
+- id: cross-site-scripting
+  title: A user could run their own script in other people's browsers on {to} by saving content that pages show without escaping it
+  kind: tamper
+  applies:
+    flow:
+      from_kind: [client]
+      to_kind: [service]
+      carries: [confidential, secret]
+  attack:
+    - Find a field whose value is shown to other users, such as a name, comment or invoice note.
+    - Save a value containing markup instead of plain text.
+    - When someone else views it, the browser runs it as part of the page, with their session.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  gives:
+    access: any-user
+  mitigations:
+    - id: escape-output
+      title: Render user content only through the framework's escaping, never as raw HTML
+      effect: eliminates
+      by_tech:
+        node: Avoid `dangerouslySetInnerHTML`, `v-html` and `{@html}`; if you must render HTML, sanitize it with a maintained library first.
+        go: Use `html/template`, not `text/template`, for anything that produces HTML.
+        python: Keep autoescaping on in Jinja/Django templates and avoid `|safe` and `mark_safe` on user data.
+    - id: content-security-policy
+      title: Send a strict Content-Security-Policy that blocks inline and third-party scripts
+      effect: {effort: hard}
+    - id: waf-xss-rules
+      title: Use WAF rules to block and log obvious script injection attempts, as an extra layer and not the fix
+      effect: detects
+  why_it_matters: >
+    Script running in your page can do anything the user can. One
+    unescaped field anywhere is enough.
+  refs: {stride: [tampering], cwe: [CWE-79], owasp: ["A03:2021"]}
+
+- id: database-injection
+  title: Someone could read or change any data in {to} by getting {from} to run database commands built from their input (SQL injection)
+  kind: tamper
+  applies:
+    flow:
+      from_kind: [service]
+      to_kind: [database]
+  attack:
+    - Find an input that ends up in a database query, such as a search box, filter or sort parameter.
+    - Send input containing database syntax instead of a normal value.
+    - Use the changed query to read other tables or modify records.
+  defaults: {who: anyone, effort: moderate, impact: critical}
+  gives:
+    reads: ["{data}"]
+    changes: ["{data}"]
+  mitigations:
+    - id: parameterized-queries
+      title: Use parameterized queries everywhere, and never build SQL by joining strings
+      effect: eliminates
+      by_tech:
+        go: Pass values as arguments, e.g. `db.Query("... WHERE id = $1", id)`; never `fmt.Sprintf` into SQL.
+        node: Use placeholders (`$1`, `?`) or a query builder, never template strings with user input.
+        python: Pass parameters separately, e.g. `cursor.execute("... WHERE id = %s", (id,))`.
+    - id: least-privilege-db-user
+      title: Connect with a database user that can only touch the tables the service needs
+      effect: {impact: medium}
+    - id: waf-injection-rules
+      title: Put a web application firewall (WAF) with injection rules in front of the service, as an extra layer and not the fix
+      effect: {effort: hard}
+  why_it_matters: >
+    Old, well known, and still common wherever a query is assembled by
+    hand, especially for sorting and filtering.
+  refs: {stride: [tampering, information-disclosure], cwe: [CWE-89], owasp: ["A03:2021"]}
+
+- id: server-side-request-forgery
+  title: A logged-in user could make {component} fetch internal addresses for them, such as the cloud metadata service, by giving it a URL to load (server-side request forgery, SSRF)
+  kind: leak
+  applies:
+    component:
+      kind: [service]
+      tech: [headless-chrome, puppeteer, playwright, wkhtmltopdf, imagemagick, webhooks, url-preview]
+  attack:
+    - Find a feature where you supply a URL the server fetches, such as an image, webhook or link preview.
+    - Give it an internal address instead of a public one.
+    - Read whatever the server got back from inside your network.
+  defaults: {who: any-user, effort: moderate, impact: critical}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: block-internal-fetches
+      title: Only fetch from an allowlist of hosts, and block private, loopback and link-local addresses after DNS resolution
+      effect: eliminates
+    - id: require-imdsv2
+      title: Require token-based metadata access (IMDSv2) so a plain GET can't read cloud credentials
+      effect: {effort: hard}
+  why_it_matters: >
+    Your server sits inside your network, so a URL fetcher turns it into
+    a proxy for the attacker. Cloud metadata endpoints hand out credentials.
+  refs: {stride: [information-disclosure], cwe: [CWE-918], owasp: ["API7:2023"]}
+
+- id: cross-site-request-forgery
+  title: Another website could make users' browsers change things on {to} without them noticing (cross-site request forgery, CSRF)
+  kind: tamper
+  applies:
+    flow:
+      from_kind: [client]
+      auth: [session-cookie]
+  attack:
+    - Build a page that sends a request to {to}, such as a hidden form that changes an email address.
+    - Get a logged-in user to visit it.
+    - Their browser sends the request with their cookie, and {to} accepts it.
+  defaults: {who: anyone, effort: moderate, impact: medium}
+  mitigations:
+    - id: samesite-and-csrf-tokens
+      title: Use SameSite cookies and require a CSRF token or custom header on every state-changing request
+      effect: eliminates
+  why_it_matters: >
+    Browsers attach cookies automatically, so the server can't tell a
+    request the user meant from one another site triggered.
+  refs: {stride: [tampering], cwe: [CWE-352]}
+
+- id: permissive-cors
+  title: Another website could read users' data from {to} through their logged-in browser if it allows requests from any origin (CORS)
+  kind: leak
+  applies:
+    flow:
+      from_kind: [client]
+      auth: [session-cookie]
+      carries: [confidential, secret]
+  attack:
+    - Check whether {to} echoes any Origin back in Access-Control-Allow-Origin with credentials allowed.
+    - Put a script on another site that calls the API.
+    - When a logged-in user visits, read the responses with their data.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: strict-cors-allowlist
+      title: Allow only your own origins in CORS, and never reflect the request's Origin with credentials
+      effect: eliminates
+  why_it_matters: >
+    A wildcard or reflected origin is a one-line config mistake that
+    turns every user's browser into a way to read their data.
+  refs: {stride: [information-disclosure], cwe: [CWE-942]}
+
+- id: mass-assignment
+  title: A user could give themselves extra rights on {component} by sending fields the API didn't mean to accept, like role or account ID
+  kind: escalate
+  applies:
+    component:
+      kind: [service]
+      exposure: [internet]
+      handles: [confidential, secret]
+  attack:
+    - Look at what the API returns for your own profile or record.
+    - Send an update that also includes fields like role, plan or owner.
+    - See whether the server saved them.
+  defaults: {who: any-user, effort: trivial, impact: high}
+  gives:
+    access: privileged
+  mitigations:
+    - id: explicit-update-fields
+      title: Copy only an explicit list of allowed fields from requests into records
+      effect: eliminates
+      by_tech:
+        go: Decode into a request struct with only the editable fields, then copy them; don't decode straight into the database model.
+        node: Pick allowed fields explicitly (e.g. with a schema validator) instead of spreading `req.body` into the model.
+        python: Use serializers or forms with an explicit `fields` list.
+  why_it_matters: >
+    Frameworks that bind request bodies straight onto models make this
+    the default, and nothing looks wrong in normal use.
+  refs: {stride: [elevation-of-privilege], cwe: [CWE-915], owasp: ["API3:2023"]}
+
+- id: resource-exhaustion
+  title: Anyone could slow down or take {component} offline by sending many expensive requests
+  kind: disrupt
+  applies:
+    component:
+      kind: [service]
+      exposure: [internet]
+  attack:
+    - Find a slow or heavy endpoint, such as search, export or large uploads.
+    - Send many requests to it at once, or ask for huge pages of results.
+    - Watch the service slow down or fall over for everyone.
+  defaults: {who: anyone, effort: trivial, impact: medium}
+  mitigations:
+    - id: rate-limits-and-timeouts
+      title: Add per-client rate limits, request size limits and timeouts
+      effect: {effort: hard}
+    - id: bounded-queries
+      title: Cap page sizes and query complexity, and move heavy work to background jobs
+      effect: {impact: low}
+    - id: edge-ddos-protection
+      title: Serve it through a CDN or gateway with DDoS protection and rate limiting at the edge
+      effect: {effort: hard}
+  why_it_matters: >
+    One unbounded endpoint is enough to take everything down, and it
+    usually costs you money while it happens.
+  refs: {stride: [denial-of-service], cwe: [CWE-770], owasp: ["API4:2023"]}
+
+- id: unauthenticated-internal-call
+  title: Anything that gets onto the network could call {to} directly, because {from} talks to it without any authentication
+  kind: impersonate
+  applies:
+    flow:
+      to_kind: [service, database, cache, queue]
+      auth: [none]
+  attack:
+    - Get any foothold inside the network, for example through another vulnerable service.
+    - Send requests straight to {to}, pretending to be {from}.
+    - Because {to} trusts the network, it accepts them.
+  defaults: {who: insider, effort: moderate, impact: high}
+  mitigations:
+    - id: service-authentication
+      title: Authenticate service-to-service calls (mTLS, signed tokens or cloud IAM) instead of trusting the network
+      effect: eliminates
+    - id: network-policy
+      title: Restrict network access so only {from} can reach {to}
+      effect: {effort: hard}
+  why_it_matters: >
+    "It's internal" stops being true the moment one service is
+    compromised. Unauthenticated internal calls let one breach spread.
+  refs: {stride: [spoofing], cwe: [CWE-306]}
+
+- id: unsafe-file-uploads
+  title: A user could get their own script running in other users' sessions, or overload {component}, by uploading files whose type, name or size it trusts, especially if uploads are served back from the app's own domain
+  kind: tamper
+  applies:
+    - component:
+        kind: [service]
+        tech: [uploads, file-uploads, file-upload, multer, formidable, busboy, tus, uppy, active-storage, carrierwave, shrine, django-storages]
+    - component:
+        kind: [service]
+        features: [file-upload]
+  attack:
+    - Upload a harmless test file whose extension and declared type don't match its content, such as an HTML or SVG file named like a photo.
+    - Open the uploaded file's address, and note which domain serves it and whether the browser shows it as a page.
+    - Upload a file far larger than any real one, or a small archive or image that expands hugely when processed, and watch memory and disk use.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  mitigations:
+    - id: check-upload-content
+      title: Decide a file's type from its content against an allowlist, ignore the filename and content type the client sends, and store it under a name you generate
+      effect: {effort: hard}
+      by_tech:
+        go: Sniff the first 512 bytes with `http.DetectContentType`, check the result against an allowlist, and never use the uploaded filename in a path.
+        node: With multer, set `limits` and a `fileFilter`, check the real type with the `file-type` package, and generate the stored name yourself.
+        python: Check the type with `python-magic`, or by opening images with Pillow, and store files under a generated name rather than the uploaded one.
+    - id: separate-upload-domain
+      title: "Serve uploads from a separate domain that shares no cookies with the app, with `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`"
+      effect: {impact: medium}
+      by_tech:
+        aws: Serve uploads from their own bucket through a separate CloudFront domain, with a response headers policy that sets these headers.
+    - id: upload-size-limits
+      title: Limit upload size at the gateway and in the app, cap image dimensions and archive expansion, and process files in a separate worker with memory and time limits
+      effect: {impact: low}
+      by_tech:
+        go: Wrap the body in `http.MaxBytesReader`, and check image dimensions with `image.DecodeConfig` before decoding.
+        node: Set `limits.fileSize` in multer or busboy, and a body size limit at the proxy, such as `client_max_body_size` in nginx.
+        python: Django has no total limit for file uploads, so cap request size at the proxy and check `file.size` in the form, and set `Image.MAX_IMAGE_PIXELS` in Pillow.
+  why_it_matters: >
+    Upload code tends to trust whatever the browser says about a file. Served
+    from your own domain, an uploaded HTML or SVG file runs with your users'
+    sessions.
+  refs: {stride: [tampering, denial-of-service], cwe: [CWE-434, CWE-400]}
+
+- id: open-redirect
+  title: Someone could send users to a phishing site through a link that really starts with {to}'s address, if {to} redirects to any address given in a parameter such as next or return-to (an open redirect)
+  kind: impersonate
+  applies:
+    flow:
+      from_kind: [client]
+      to_kind: [service, identity]
+      auth: [session-cookie]
+  attack:
+    - Find a page that redirects after an action, such as login, logout or a link tracker, and note the parameter that holds the destination.
+    - Change the destination to a test site you control.
+    - See whether {to} sends the browser there, and whether a sign-in code or token goes along.
+  defaults: {who: anyone, effort: trivial, impact: medium}
+  mitigations:
+    - id: relative-or-allowlisted-redirects
+      title: Redirect only to relative paths on your own site or to an allowlist of exact hosts, and fall back to the home page for anything else
+      effect: eliminates
+      by_tech:
+        go: Parse the target with `url.Parse` and accept only a path that starts with a single `/`, with no scheme or host, rejecting `//` and backslashes.
+        node: Resolve the target with `new URL(target, base)` and redirect only if its origin equals your own, instead of matching strings.
+        python: Check the target with Django's `url_has_allowed_host_and_scheme()` before redirecting.
+    - id: redirect-by-name-not-url
+      title: Keep destinations on the server and put only a route name or ID in the link
+      effect: {effort: hard}
+  why_it_matters: >
+    The link looks trustworthy because it really is your domain. Open
+    redirects also turn small sign-in mistakes into stolen login codes.
+  refs: {stride: [spoofing], cwe: [CWE-601]}
+
+- id: unsafe-deserialization
+  title: Anyone who can send data to {component} could run their own code on it if it turns untrusted bytes back into objects with a format that can create any type, such as Java serialization, Python pickle, Ruby Marshal or YAML with custom tags (unsafe deserialization)
+  kind: escalate
+  applies:
+    component:
+      kind: [service]
+      tech: [java, spring, kotlin, scala, dotnet, csharp, php, laravel, ruby, rails, python, django, flask, pickle]
+  attack:
+    - Look for places where {component} reads serialized objects from outside, such as cookies, hidden form fields, queue messages, caches or file imports.
+    - Check which format and library decode them, and whether that format lets the data choose which types get created.
+    - Run a dependency scanner and check whether that library, or anything else loaded with it, has known deserialization vulnerabilities.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  gives:
+    controls: ["{component}"]
+  mitigations:
+    - id: data-only-formats
+      title: Accept only plain data formats such as JSON, decoded into fixed types, for anything that comes from outside
+      effect: eliminates
+      by_tech:
+        java: Don't use `ObjectInputStream` on untrusted input, or set an `ObjectInputFilter` allowlist if you must, and don't turn on default typing in Jackson.
+        python: Never use `pickle`, `shelve` or `yaml.load` on untrusted data, and use `json` or `yaml.safe_load` instead.
+        php: Use `json_decode` instead of `unserialize`, or pass `['allowed_classes' => false]` to `unserialize`.
+        ruby: Use `JSON.parse` or `YAML.safe_load` instead of `Marshal.load` on untrusted input.
+        dotnet: Don't use `BinaryFormatter`, use `System.Text.Json` with known types, and keep `TypeNameHandling` at `None` in Json.NET.
+    - id: sign-serialized-state
+      title: If serialized state has to round-trip through clients or shared stores, sign it with a server-side key and check the signature before decoding
+      effect: {effort: hard}
+  why_it_matters: >
+    Native object formats let the data decide which classes get built, and
+    ordinary libraries already loaded can be chained into running commands. The
+    bug lives in one innocent-looking decode call.
+  refs: {stride: [elevation-of-privilege, tampering], cwe: [CWE-502], owasp: ["A08:2021"]}
+
+- id: xml-external-entities
+  title: Anyone who can send {component} a markup document to parse (XML), such as an API request, a single sign-on response or an office file, could make it read local files or call internal addresses, if its parser follows external entities, a little-known feature that pulls in other files (XXE)
+  kind: leak
+  applies:
+    component:
+      kind: [service]
+      tech: [xml, soap, wsdl, saml, xslt, svg, docx, xlsx, office-documents, rss, libxml2, lxml]
+  attack:
+    - Find every place {component} parses XML, including SOAP endpoints, single sign-on responses, SVG images and office documents, which are XML inside.
+    - Check which parser and settings each one uses.
+    - In a test environment, send a document that declares an entity pointing at a harmless test file, and see whether that file's content appears in the response or logs.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  mitigations:
+    - id: disable-xml-dtds
+      title: Turn off document type definitions (DTDs) and external entities in every XML parser, or use a parser that never resolves them
+      effect: eliminates
+      by_tech:
+        java: Set the `http://apache.org/xml/features/disallow-doctype-decl` feature to true on `DocumentBuilderFactory` and `SAXParserFactory`, and `XMLConstants.ACCESS_EXTERNAL_DTD` to empty on other parsers.
+        python: Parse untrusted XML with `defusedxml`, and with lxml set `resolve_entities=False` and `no_network=True`.
+        php: Use PHP 8 or later, where external entities are off by default, and never pass `LIBXML_NOENT`.
+        dotnet: Set `DtdProcessing.Prohibit` on `XmlReaderSettings` and leave `XmlResolver` null.
+        go: Go's `encoding/xml` doesn't resolve external entities, so check any C-based XML library you call through cgo instead.
+        node: Don't turn on entity expansion (`noent`) in libxmljs, or use a pure-JavaScript parser that doesn't resolve external entities.
+    - id: prefer-json-over-xml
+      title: Accept JSON instead of XML wherever you control both sides
+      effect: {impact: low}
+  why_it_matters: >
+    Many XML parsers, especially in Java, still resolve external entities by
+    default. XML also hides inside formats nobody thinks of as XML, like SVG
+    images and office documents.
+  refs: {stride: [information-disclosure], cwe: [CWE-611], owasp: ["A05:2021"]}
+
+- id: graphql-unbounded-queries
+  title: Anyone could slow down or take {component} offline with deeply nested or very wide GraphQL queries, after mapping every hidden field first, if it has no depth or cost limits and leaves schema introspection on in production
+  kind: disrupt
+  applies:
+    component:
+      kind: [service, gateway]
+      exposure: [internet]
+      tech: [graphql, apollo, apollo-server, graphql-yoga, hasura, gqlgen, graphene, strawberry, mercurius, absinthe, hot-chocolate, postgraphile]
+  attack:
+    - Ask {component} for its schema through introspection, and see whether it answers in production.
+    - Write a test query that nests related objects many levels deep, or asks for many aliased copies of an expensive field.
+    - Send a few at once and watch response times and database load.
+  defaults: {who: anyone, effort: trivial, impact: medium}
+  mitigations:
+    - id: graphql-depth-and-cost-limits
+      title: Reject queries over a maximum depth, alias count or calculated cost before running them, and cap list sizes and batched queries
+      effect: {effort: hard}
+      by_tech:
+        node: With Apollo Server or GraphQL Yoga, add depth and cost validation rules (such as `graphql-depth-limit` and a cost-analysis plugin), and turn off query batching if you don't use it.
+        go: With gqlgen, add `extension.FixedComplexityLimit` to the handler and set complexity functions for expensive fields.
+        python: With Strawberry, add the `QueryDepthLimiter` and `MaxAliasesLimiter` extensions.
+        hasura: Set depth and node limits in Hasura's API limits settings.
+    - id: persisted-queries-only
+      title: In production, accept only persisted queries that your own clients registered at build time
+      effect: eliminates
+    - id: introspection-off-in-production
+      title: Turn off introspection and field suggestions in production
+      effect: {effort: hard}
+      by_tech:
+        node: Apollo Server turns introspection off when `NODE_ENV` is production, so check it stays that way, and hide field suggestions too.
+  why_it_matters: >
+    One GraphQL request can ask for as much work as thousands of REST calls,
+    and normal rate limits count it as one. Introspection hands attackers a map
+    of every field, including ones the UI never uses.
+  refs: {stride: [denial-of-service, information-disclosure], cwe: [CWE-770], owasp: ["API4:2023"]}
+
+- id: clickjacking
+  title: Another website could trick logged-in users into clicking buttons on {to}, such as approving a payment or changing settings, by showing its pages in a hidden frame (clickjacking)
+  kind: tamper
+  applies:
+    flow:
+      from_kind: [client]
+      to_kind: [service, identity]
+      auth: [session-cookie]
+  attack:
+    - Build a test page on another domain that loads a sensitive page of {to} in a frame.
+    - Open it while logged in to {to}, and see whether the browser shows the framed page.
+    - If it does, a page could hide it under a harmless-looking button so the user clicks the real one.
+  defaults: {who: anyone, effort: moderate, impact: medium}
+  mitigations:
+    - id: frame-ancestors-header
+      title: "Send `Content-Security-Policy: frame-ancestors 'none'` (or 'self') on every page, plus `X-Frame-Options: DENY` for older browsers"
+      effect: eliminates
+      by_tech:
+        go: Set both headers in middleware that wraps the whole router, not in individual handlers.
+        node: Use `helmet()`, which already sends `frame-ancestors 'self'`, and tighten it to none for pages that never need framing.
+        python: Keep Django's `XFrameOptionsMiddleware` on (it sends DENY by default), and add frame-ancestors to your Content-Security-Policy.
+    - id: samesite-for-framed-pages
+      title: Set session cookies SameSite=Lax or Strict, so pages framed by another site load logged out
+      effect: {effort: hard}
+    - id: confirm-sensitive-clicks
+      title: Ask users to re-enter their password or a typed value before the most sensitive actions
+      effect: {impact: low}
+  why_it_matters: >
+    Nothing in the page's own code is wrong; the fix is a response header
+    that's easy to forget. Any page with a one-click action is a candidate.
+  refs: {stride: [tampering], cwe: [CWE-1021], capec: [CAPEC-103]}

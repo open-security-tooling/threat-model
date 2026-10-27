@@ -1,0 +1,405 @@
+# Release the threat CLI when a signed v* tag is pushed.
+#
+# SLSA Build L2 today; stage 2 moves build and attest into an org reusable
+# workflow for L3. Action pins are full SHAs of releases at least two weeks old.
+#
+# Why there are five jobs:
+#   preflight  Checks the tag: semver, annotated, signature verified by GitHub, and
+#              pointing at a commit on main. Runs no repo code.
+#   build      Runs our build (Go, npm, syft). It gets no id-token, no write token and
+#              no secrets, so nothing in the build can sign provenance, touch the
+#              release or reach the tap.
+#   attest     Signs build provenance and the SBOM attestation. It runs no repo code,
+#              only GitHub-owned actions and sha256sum on files handed over from build.
+#              This is the key isolation SLSA Build L3 asks for. Stage 2 moves these
+#              jobs into an org reusable workflow so verifiers can pin the builder
+#              identity (see release-workflows/.github/workflows/go-cli.yml).
+#   release    Creates a draft release, uploads all assets, then publishes it. With
+#              immutable releases turned on, publishing locks the assets and the tag
+#              and GitHub adds a release attestation.
+#   homebrew   Opens a PR on open-security-tooling/homebrew-tap using a short-lived
+#              GitHub App token. The App key lives only in the `homebrew-tap`
+#              environment, which only v* tags can use. Skipped for pre-releases.
+#
+# Repo settings this needs: environments `release` and `homebrew-tap`, both
+# limited to v* tags; `homebrew-tap` holds secret TAP_APP_PRIVATE_KEY and
+# variable TAP_APP_CLIENT_ID. Immutable releases on.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      commit: ${{ steps.tag.outputs.commit }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - name: Check the tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$TAG' isn't a release tag. Use vMAJOR.MINOR.PATCH, for example v0.1.0 or v0.2.0-rc.1."
+            exit 1
+          fi
+
+          read -r type obj < <(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
+          if [ "$type" != tag ]; then
+            echo "::error::$TAG is a lightweight tag. Delete it and push a signed annotated tag: git tag -s $TAG -m $TAG"
+            exit 1
+          fi
+
+          read -r verified reason target_type commit < <(gh api "repos/$REPO/git/tags/$obj" \
+            --jq '"\(.verification.verified) \(.verification.reason) \(.object.type) \(.object.sha)"')
+          if [ "$verified" != true ]; then
+            echo "::error::GitHub couldn't verify the signature on $TAG (reason: $reason). Sign tags with your registered signing key."
+            exit 1
+          fi
+          if [ "$target_type" != commit ]; then
+            echo "::error::$TAG points at a $target_type, not a commit."
+            exit 1
+          fi
+
+          # "behind" or "identical" means the tagged commit is already on main.
+          status=$(gh api "repos/$REPO/compare/main...$commit" --jq .status)
+          case "$status" in
+            identical|behind) ;;
+            *) echo "::error::$TAG points at $commit, which isn't on main (compare status: $status). Tag a commit that landed through a PR."; exit 1 ;;
+          esac
+
+          version=${TAG#v}
+          prerelease=false; [[ "$version" == *-* ]] && prerelease=true
+          {
+            echo "version=$version"
+            echo "commit=$commit"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check we're building the tagged commit
+        env:
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod # uses the `toolchain` line when present
+          cache: false # no caches in release builds: nothing from other runs can leak in
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Install syft (pinned version, checksum checked)
+        env:
+          SYFT_VERSION: 1.54.1
+          # sha256 of syft_1.54.1_linux_amd64.tar.gz, matches the release's checksums.txt and GitHub's asset digest
+          SYFT_SHA256: c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/syft.tar.gz" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_SHA256}  $RUNNER_TEMP/syft.tar.gz" | sha256sum --strict -c -
+          tar -xzf "$RUNNER_TEMP/syft.tar.gz" -C "$RUNNER_TEMP" syft
+
+      # Scan the clean source tree (go.mod, web/package-lock.json) before anything is installed or built.
+      - name: SBOM
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          mkdir -p dist
+          "$RUNNER_TEMP/syft" scan dir:. --source-name threat --source-version "$VERSION" -o spdx-json=dist/threat.spdx.json
+
+      # Built once, so every binary embeds the same web app.
+      - name: Build the web app
+        run: make web
+
+      - name: Build binaries
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            export GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0
+            ext=""; [ "$GOOS" = windows ] && ext=.exe
+            go build -trimpath -buildvcs=true -tags webapp -ldflags="-s -w -X main.version=${VERSION}" \
+              -o "dist/threat_${GOOS}_${GOARCH}${ext}" ./cmd/threat
+          done
+          go version -m dist/threat_linux_amd64
+          # The build writes only to ignored paths, so the tree must still be clean.
+          if go version -m dist/threat_linux_amd64 | grep -q 'vcs.modified=true'; then
+            echo "::error::Binaries are stamped vcs.modified=true: the build changed a tracked file."
+            exit 1
+          fi
+
+      - name: Smoke test
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: test "$(./dist/threat_linux_amd64 version)" = "threat $VERSION"
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum threat_* threat.spdx.json > checksums.txt && cat checksums.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write     # Sigstore signing certificate for this workflow
+      attestations: write # store the attestations on the repo
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: dist
+
+      - name: Check the files match the build job's checksums
+        working-directory: dist
+        run: sha256sum --strict -c checksums.txt
+
+      - name: Build provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/threat_*
+            dist/checksums.txt
+            dist/threat.spdx.json
+
+      - name: SBOM attestation
+        id: sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/threat_*
+          sbom-path: dist/threat.spdx.json
+
+      # Shipping the bundles lets people verify offline or with cosign, and lets
+      # OpenSSF Scorecard's Signed-Releases check see them.
+      - name: Collect the attestation bundles
+        env:
+          PROVENANCE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM: ${{ steps.sbom.outputs.bundle-path }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          mkdir -p bundles
+          cp "$PROVENANCE" "bundles/threat_${VERSION}_provenance.sigstore.json"
+          cp "$SBOM" "bundles/threat_${VERSION}_sbom.sigstore.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-attestations
+          path: bundles/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [preflight, attest]
+    runs-on: ubuntu-latest
+    environment: release # tags v* only; add yourself as a required reviewer for a final human check
+    permissions:
+      contents: write # create and publish the release
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-attestations
+          path: dist
+
+      - name: Write release notes
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          ## Install
+
+          \`\`\`sh
+          brew install open-security-tooling/tap/threat
+          \`\`\`
+
+          Or download the binary for your platform below.
+
+          ## Verify your download
+
+          Every binary has signed build provenance. With the [GitHub CLI](https://cli.github.com) (2.81 or later):
+
+          \`\`\`sh
+          gh attestation verify threat_linux_amd64 --repo ${REPO} \\
+            --signer-workflow ${REPO}/.github/workflows/release.yml \\
+            --source-ref refs/tags/${TAG} --deny-self-hosted-runners
+          gh release verify-asset ${TAG} threat_linux_amd64 --repo ${REPO}
+          \`\`\`
+
+          The first command proves the file was built by our release workflow from tag ${TAG}.
+          The second proves it's the exact file attached to this immutable release.
+          Replace \`threat_linux_amd64\` with the file you downloaded.
+
+          Without the GitHub CLI: \`sha256sum --ignore-missing -c checksums.txt\` checks integrity only.
+          The \`*.sigstore.json\` files are the attestation bundles for offline or cosign verification.
+
+          | File | What it is |
+          |---|---|
+          | \`threat_<os>_<arch>\` | The CLI. Rename it to \`threat\` and put it on your PATH. |
+          | \`checksums.txt\` | SHA-256 of every file |
+          | \`threat.spdx.json\` | SBOM (SPDX 2.3) of the Go and npm dependencies |
+          | \`threat_${VERSION}_provenance.sigstore.json\` | Build provenance bundle (SLSA v1) |
+          | \`threat_${VERSION}_sbom.sigstore.json\` | SBOM attestation bundle |
+          EOF
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          flags=(--repo "$REPO" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag --draft)
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          # Draft first, upload everything, then publish: an immutable release can't take assets after publishing.
+          gh release create "$TAG" dist/* "${flags[@]}"
+          gh release edit "$TAG" --repo "$REPO" --draft=false
+
+  homebrew:
+    needs: [preflight, release]
+    # Skipped for pre-releases, and until the tap's GitHub App is set up.
+    if: needs.preflight.outputs.prerelease == 'false' && vars.TAP_APP_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    environment: homebrew-tap # tags v* only; the only place the App key exists
+    permissions: {} # the GitHub App token does the work; GITHUB_TOKEN gets nothing
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: dist
+
+      - name: Render the formula
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sum() { awk -v f="$1" '$2 == f { print $1 }' dist/checksums.txt | grep -E '^[0-9a-f]{64}$'; }
+          base="https://github.com/${REPO}/releases/download/${TAG}"
+          # Assignments, not inline $(...), so a missing checksum stops the job.
+          darwin_arm64=$(sum threat_darwin_arm64); darwin_amd64=$(sum threat_darwin_amd64)
+          linux_arm64=$(sum threat_linux_arm64);   linux_amd64=$(sum threat_linux_amd64)
+          cat > threat.rb <<EOF
+          # Updated by the threat-model release workflow. Review the PR, then merge.
+          class Threat < Formula
+            desc "Threat modeling for developers: plain-file models, explained risk, CI checks"
+            homepage "https://github.com/${REPO}"
+            version "${VERSION}"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "${base}/threat_darwin_arm64"
+                sha256 "${darwin_arm64}"
+              end
+              on_intel do
+                url "${base}/threat_darwin_amd64"
+                sha256 "${darwin_amd64}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "${base}/threat_linux_arm64"
+                sha256 "${linux_arm64}"
+              end
+              on_intel do
+                url "${base}/threat_linux_amd64"
+                sha256 "${linux_amd64}"
+              end
+            end
+
+            def install
+              binary = Dir["threat_*"].fetch(0)
+              chmod 0755, binary
+              bin.install binary => "threat"
+            end
+
+            test do
+              assert_equal "threat #{version}", shell_output("#{bin}/threat version").strip
+            end
+          end
+          EOF
+          cat threat.rb
+
+      - name: Get a token for the tap repo only
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.TAP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: open-security-tooling
+          repositories: homebrew-tap
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open a pull request on the tap
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tap=open-security-tooling/homebrew-tap
+          branch="threat-${VERSION}"
+          base=$(gh api "repos/$tap/git/ref/heads/main" --jq .object.sha)
+          gh api -X POST "repos/$tap/git/refs" -f ref="refs/heads/$branch" -f sha="$base" > /dev/null
+
+          args=(-X PUT "repos/$tap/contents/Formula/threat.rb"
+                -f message="threat ${VERSION}" -f branch="$branch" -f content="$(base64 -w0 threat.rb)")
+          if current=$(gh api "repos/$tap/contents/Formula/threat.rb?ref=main" --jq .sha 2>/dev/null); then
+            args+=(-f sha="$current")
+          fi
+          # No author or committer fields: GitHub then signs the commit as the App,
+          # which passes the tap's signed-commits rule.
+          gh api "${args[@]}" > /dev/null
+
+          gh api -X POST "repos/$tap/pulls" -f base=main -f head="$branch" -f title="threat ${VERSION}" \
+            -f body="Release: https://github.com/${REPO}/releases/tag/${TAG}. CI checks every URL's provenance before this can merge." \
+            --jq .html_url

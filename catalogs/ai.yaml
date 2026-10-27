@@ -1,0 +1,158 @@
+# LLMs, agents and anything that feeds text to a model.
+
+- id: indirect-prompt-injection
+  title: Someone could make {component} follow their instructions by hiding them in content it reads, like documents, emails or web pages (prompt injection)
+  kind: manipulate-ai
+  applies:
+    component:
+      kind: [ai]
+  attack:
+    - Put instructions for the model inside content the assistant will later read, such as a note, file or page.
+    - Wait for a user to ask the assistant about that content.
+    - The model treats the hidden text as instructions and acts on them with the user's access.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: limit-ai-to-caller-data
+      title: Give the model only data the current user may see, and never tools that reach other users' data
+      effect: {impact: low}
+    - id: confirm-ai-actions
+      title: Require a person to confirm any action the model proposes that changes data or contacts someone
+      effect: {effort: hard}
+  why_it_matters: >
+    Models can't reliably tell instructions from data. Anything they read
+    can steer them, so their access is what limits the damage.
+  refs: {owasp: ["LLM01:2025"]}
+
+- id: direct-prompt-injection
+  title: A user could get {component} to ignore its rules and say or do things it shouldn't by asking it in clever ways (jailbreaking)
+  kind: manipulate-ai
+  applies:
+    component:
+      kind: [ai]
+      exposure: [internet]
+  attack:
+    - Chat with the assistant directly.
+    - Ask it to role-play, or tell it that its previous instructions no longer apply.
+    - Get it to reveal its instructions or take actions it was told not to.
+  defaults: {who: any-user, effort: trivial, impact: medium}
+  mitigations:
+    - id: enforce-rules-outside-model
+      title: Enforce permissions in code around the model, not only in its system prompt
+      effect: {impact: low}
+  why_it_matters: >
+    A system prompt is a suggestion, not a security boundary. Anything the
+    model is "told not to do" must also be impossible for its tools.
+  refs: {owasp: ["LLM01:2025"]}
+
+- id: excessive-agency
+  title: Someone who steers {component} could make it delete data, send messages or spend money through its tools without a person approving
+  kind: escalate
+  applies:
+    component:
+      kind: [ai]
+  attack:
+    - Get the model to follow your instructions, directly or through content it reads.
+    - Ask it to use one of its tools for something harmful.
+    - The tool runs with whatever permissions it was given.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  mitigations:
+    - id: least-privilege-ai-tools
+      title: Give each tool the narrowest permissions it needs, scoped to the current user
+      effect: {impact: medium}
+    - id: approve-destructive-actions
+      title: Require explicit user approval for destructive or external actions
+      effect: {effort: hard}
+  why_it_matters: >
+    An agent's tools are its blast radius. Broad tools turn any
+    manipulation into real damage.
+  refs: {owasp: ["LLM06:2025"]}
+
+- id: exfiltration-via-output
+  title: Someone could get {component} to leak {data} by making it output a link or image whose address carries the data
+  kind: leak
+  applies:
+    component:
+      kind: [ai]
+  attack:
+    - Steer the model, for example with hidden instructions in content it reads.
+    - Have it include a link or image that points to your server, with the data in the address.
+    - When the app renders the answer, the browser sends the data to you.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: no-untrusted-links-in-ai-output
+      title: Don't render images or links from model output unless they point to allowlisted domains
+      effect: eliminates
+  why_it_matters: >
+    Rendering model output as rich text quietly gives the model a way to
+    send data anywhere, with no click needed for images.
+  refs: {owasp: ["LLM02:2025"]}
+
+- id: shared-context-leak
+  title: A user could see other users' {data} through {component} if the documents or search results it uses aren't filtered to the current user
+  kind: leak
+  applies:
+    component:
+      kind: [ai]
+      stores: [confidential, secret]
+  attack:
+    - Ask the assistant about something only another customer would know.
+    - The retrieval step finds the other customer's documents because results aren't filtered by user.
+    - The assistant summarises them in its answer.
+  defaults: {who: any-user, effort: trivial, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: filter-retrieval-by-user
+      title: Filter retrieval and search results by the current user's permissions before they reach the model
+      effect: eliminates
+  why_it_matters: >
+    Vector stores and search indexes often skip the access checks the main
+    database has. The model then repeats whatever it finds.
+  refs: {owasp: ["LLM08:2025"]}
+
+- id: ai-cost-exhaustion
+  title: Anyone could run up a large bill or use up your quota on {component} by sending many long requests
+  kind: disrupt
+  applies:
+    component:
+      kind: [ai]
+  attack:
+    - Script many requests to the feature that calls the model.
+    - Make each one as long and expensive as possible.
+    - The bill grows, or the quota runs out and the feature stops working for everyone.
+  defaults: {who: any-user, effort: trivial, impact: medium}
+  mitigations:
+    - id: per-user-ai-quotas
+      title: Set per-user rate limits and token budgets, and cap input and output size
+      effect: {impact: low}
+    - id: spend-alerts
+      title: Set spend limits and alerts with the model provider
+      effect: detects
+  why_it_matters: >
+    Model calls cost real money per request, so an abuse spike shows up
+    as an invoice, not just as load.
+  refs: {owasp: ["LLM10:2025"]}
+
+- id: unsafe-ai-output
+  title: Someone could get code or markup into your app by making {component} produce it, if its output is run or shown as HTML
+  kind: tamper
+  applies:
+    component:
+      kind: [ai]
+  attack:
+    - Steer the model to include markup, script or commands in its answer.
+    - The app inserts that answer into a page as HTML, or passes it to a shell or query.
+    - The injected content runs with the app's or the user's privileges.
+  defaults: {who: any-user, effort: moderate, impact: high}
+  mitigations:
+    - id: treat-ai-output-as-untrusted
+      title: Treat model output like user input, so escape it when rendering and never execute it directly
+      effect: eliminates
+  why_it_matters: >
+    It's tempting to trust text your own system generated, but the model
+    may be repeating what an attacker wrote.
+  refs: {owasp: ["LLM05:2025"]}

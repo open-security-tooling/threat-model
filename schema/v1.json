@@ -1,0 +1,797 @@
+{
+  "$id": "https://open-security-tooling.github.io/threat-model/schema/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actors": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "access": {
+            "enum": [
+              "anyone",
+              "any-user",
+              "insider",
+              "privileged",
+              "physical"
+            ]
+          },
+          "id": {
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "catalogs": {
+      "items": {
+        "oneOf": [
+          {
+            "pattern": "^builtin:[a-z0-9-]+$",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    },
+    "components": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "description": "Paths or globs of the code that implements it",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "considered": {
+            "additionalProperties": false,
+            "description": "Threat kinds checked and found not to apply, with why, e.g. {disrupt: \"Stateless, autoscaled behind the load balancer\"}",
+            "properties": {
+              "abuse": {
+                "type": "string"
+              },
+              "cover-tracks": {
+                "type": "string"
+              },
+              "disrupt": {
+                "type": "string"
+              },
+              "escalate": {
+                "type": "string"
+              },
+              "impersonate": {
+                "type": "string"
+              },
+              "leak": {
+                "type": "string"
+              },
+              "manipulate-ai": {
+                "type": "string"
+              },
+              "tamper": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "encrypted_at_rest": {
+            "description": "Whether data it stores is encrypted on disk",
+            "type": "boolean"
+          },
+          "exposure": {
+            "enum": [
+              "internet",
+              "internal",
+              "local"
+            ]
+          },
+          "features": {
+            "description": "What it does, in plain words: login, signup, password-reset, file-upload, outbound-webhooks, inbound-webhooks, admin-panel, search, export, payments…",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "identity": {
+            "description": "The identity (service account, role) it runs as",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "client",
+              "service",
+              "gateway",
+              "database",
+              "storage",
+              "queue",
+              "cache",
+              "identity",
+              "third-party",
+              "pipeline",
+              "ai",
+              "other"
+            ]
+          },
+          "managed": {
+            "description": "A managed service the provider runs and patches (e.g. RDS, an AWS load balancer)",
+            "type": "boolean"
+          },
+          "monitored": {
+            "description": "Whether security-relevant events are logged and alerted on",
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "patching": {
+            "description": "How updates to its dependencies and software are applied",
+            "enum": [
+              "automated",
+              "scheduled",
+              "manual"
+            ]
+          },
+          "reviewed": {
+            "description": "When someone last checked its threats: a date, or {on: date, by: \"@someone\"}",
+            "oneOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "by": {
+                    "type": "string"
+                  },
+                  "on": {
+                    "format": "date",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "on",
+                  "by"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "stores": {
+            "description": "IDs of data this component keeps",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tech": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "zone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "data": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sensitivity": {
+            "enum": [
+              "public",
+              "internal",
+              "confidential",
+              "secret"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "sensitivity"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "flows": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "auth": {
+            "enum": [
+              "none",
+              "session-cookie",
+              "bearer-token",
+              "api-key",
+              "mtls",
+              "iam",
+              "other"
+            ]
+          },
+          "carries": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "encrypted": {
+            "description": "Whether traffic is encrypted in transit (e.g. TLS)",
+            "type": "boolean"
+          },
+          "from": {
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "over": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "identities": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "can": {
+            "description": "What this identity is allowed to do",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "do": {
+                  "enum": [
+                    "read",
+                    "write",
+                    "admin",
+                    "invoke"
+                  ]
+                },
+                "on": {
+                  "description": "A component or data ID",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "do",
+                "on"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "service-account",
+              "role",
+              "user-group",
+              "api-key",
+              "other"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "layout": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "h": {
+            "type": "number"
+          },
+          "w": {
+            "type": "number"
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "mitigations": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "due": {
+            "description": "When it should be done by (YYYY-MM-DD)",
+            "format": "date",
+            "type": "string"
+          },
+          "effect": {
+            "oneOf": [
+              {
+                "enum": [
+                  "eliminates",
+                  "detects"
+                ]
+              },
+              {
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "effort": {
+                    "enum": [
+                      "trivial",
+                      "moderate",
+                      "hard"
+                    ]
+                  },
+                  "impact": {
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "who": {
+                    "enum": [
+                      "anyone",
+                      "any-user",
+                      "insider",
+                      "privileged",
+                      "physical"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            ]
+          },
+          "evidence": {
+            "items": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "test": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "test"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "link": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "link"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "id": {
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "in-progress",
+              "done"
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "signoff": {
+      "additionalProperties": false,
+      "description": "A security review of the whole model: who signed it off and when",
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "on": {
+          "format": "date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "by",
+        "on"
+      ],
+      "type": "object"
+    },
+    "system": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "links": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "What this model describes",
+          "type": "string"
+        },
+        "owners": {
+          "description": "Who maintains this model, e.g. @org/team",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tenancy": {
+          "description": "single: one customer per deployment. multi: customers share the system (multi-tenant SaaS)",
+          "enum": [
+            "single",
+            "multi"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "threats": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted": {
+            "additionalProperties": false,
+            "properties": {
+              "by": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "until": {
+                "format": "date",
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "reason",
+              "until"
+            ],
+            "type": "object"
+          },
+          "affects": {
+            "description": "Component and/or flow IDs",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "attack": {
+            "description": "The attack as concrete steps",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "effort": {
+            "enum": [
+              "trivial",
+              "moderate",
+              "hard"
+            ]
+          },
+          "from": {
+            "description": "catalog:\u003ccatalog\u003e/\u003centry\u003e when accepted from the library",
+            "type": "string"
+          },
+          "gives": {
+            "additionalProperties": false,
+            "properties": {
+              "access": {
+                "enum": [
+                  "anyone",
+                  "any-user",
+                  "insider",
+                  "privileged",
+                  "physical"
+                ]
+              },
+              "changes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "controls": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "reads": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "id": {
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "impact": {
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "impact_note": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "impersonate",
+              "tamper",
+              "cover-tracks",
+              "leak",
+              "disrupt",
+              "escalate",
+              "abuse",
+              "manipulate-ai"
+            ]
+          },
+          "mitigations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "Why this threat doesn't apply (status: not-applicable)",
+            "type": "string"
+          },
+          "refs": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "risk": {
+            "additionalProperties": false,
+            "properties": {
+              "override": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "critical"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "override",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "mitigated",
+              "accepted",
+              "not-applicable"
+            ]
+          },
+          "title": {
+            "description": "Who could do what by how",
+            "type": "string"
+          },
+          "who": {
+            "enum": [
+              "anyone",
+              "any-user",
+              "insider",
+              "privileged",
+              "physical"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "zones": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "egress": {
+            "description": "open: components can connect anywhere on the internet (default). restricted: outbound traffic only to allowed destinations",
+            "enum": [
+              "open",
+              "restricted"
+            ]
+          },
+          "id": {
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "network": {
+            "description": "open: anything in the zone can reach anything else (default). segmented: only the flows in the model are allowed",
+            "enum": [
+              "open",
+              "segmented"
+            ]
+          },
+          "trust": {
+            "enum": [
+              "untrusted",
+              "partial",
+              "trusted"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "trust"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "version",
+    "system"
+  ],
+  "title": "threat-model file (threatmodel.yaml)",
+  "type": "object"
+}

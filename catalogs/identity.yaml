@@ -1,0 +1,286 @@
+# Login, sessions, tokens and identity providers.
+
+- id: password-reset-takeover
+  title: Anyone could take over someone else's account on {component} through password reset or account recovery, if reset tokens can be guessed, reused or sent somewhere the attacker can read them
+  kind: impersonate
+  applies:
+    - component:
+        kind: [identity]
+        not_managed: true
+    - component:
+        kind: [service]
+        features: [password-reset]
+  attack:
+    - Request a password reset for your own test account and study the link, such as how long the token is, how long it stays valid and whether it works twice.
+    - Request a reset for a second test account while changing the request's Host header, and see which address the emailed link points to.
+    - Try the recovery path too, such as security questions or a support request, and see how little it takes to change the account's email.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  gives:
+    access: any-user
+  mitigations:
+    - id: random-single-use-reset-tokens
+      title: Make reset tokens random (at least 128 bits), single-use and valid for under an hour, and store only a hash of them
+      effect: {effort: hard}
+      by_tech:
+        go: Generate 32 bytes with `crypto/rand`, store `sha256(token)`, and delete the row when it's used or expires.
+        node: Use `crypto.randomBytes(32)`, store a SHA-256 hash, and compare with `crypto.timingSafeEqual`.
+        python: Use `secrets.token_urlsafe(32)` and store a hash. Django's `PasswordResetTokenGenerator` already expires tokens and stops them working once the password changes.
+    - id: fixed-reset-link-origin
+      title: Build reset links from a configured base URL, never from the request's Host header, and send them only to the address already on the account
+      effect: eliminates
+    - id: notify-and-revoke-on-recovery
+      title: Email the old address when the email or password changes, end all other sessions, and require MFA or a waiting period to change recovery details
+      effect: detects
+  why_it_matters: >
+    Reset and recovery are a second way to log in that's easy to forget.
+    They're often tested only on the happy path, and they usually skip MFA.
+  refs: {stride: [spoofing], cwe: [CWE-640], owasp: ["A07:2021"], capec: [CAPEC-50]}
+
+- id: oauth-redirect-and-state
+  title: Someone could steal users' sign-in codes, or quietly log them in to the attacker's own account, through the sign-in-with-another-account flow on {component} (OAuth) if redirect addresses aren't matched exactly or the state value isn't checked
+  kind: impersonate
+  applies:
+    - component:
+        kind: [identity]
+    - component:
+        kind: [service]
+        features: [oauth-login, sso]
+  attack:
+    - Start a sign-in in a test environment and note the redirect address the app sends to {component}.
+    - Change the redirect address to another path or subdomain and see whether {component} still sends the sign-in code there.
+    - Start a sign-in with your own test account, stop before the last step, and see whether a second test user who opens that last link ends up logged in as you.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  gives:
+    access: any-user
+  mitigations:
+    - id: exact-redirect-uris
+      title: Register exact redirect addresses with {component}, with no wildcards, open paths or test and localhost addresses in production
+      effect: eliminates
+      by_tech:
+        cognito: List full callback URLs on each app client, and keep localhost and test URLs on a separate non-production client.
+        auth0: List exact Allowed Callback URLs per application, and avoid wildcard subdomains.
+        keycloak: Set Valid Redirect URIs to full URLs instead of patterns ending in `*`.
+    - id: state-and-pkce
+      title: Send a random state value tied to the user's browser session and reject callbacks that don't return it, and use PKCE (a per-login secret that proves the same app finishes the sign-in) for every client
+      effect: eliminates
+      by_tech:
+        go: Use `golang.org/x/oauth2` with `oauth2.GenerateVerifier()` and `oauth2.S256ChallengeOption`, and compare `state` with a value kept in a short-lived HttpOnly cookie.
+        node: Use a maintained client such as `openid-client`, which creates and checks `state`, `nonce` and PKCE for you.
+        python: Use Authlib or `django-allauth`, which handle `state` and PKCE, instead of writing the callback by hand.
+    - id: single-use-auth-codes
+      title: Accept each sign-in code only once, within about a minute, and only with the matching PKCE secret
+      effect: {effort: hard}
+  why_it_matters: >
+    OAuth leaves the safety checks to each app, and a missing one breaks
+    nothing for honest users. Loose redirect rules hand codes to attackers,
+    and a missing state check lets them sign victims in to an account they watch.
+  refs: {stride: [spoofing], cwe: [CWE-601, CWE-352]}
+
+- id: jwt-not-verified
+  title: Someone could call {to} as any user with a forged, altered or expired login token, if {to} accepts JSON Web Tokens (JWTs) without checking their signing algorithm, issuer, audience and expiry
+  kind: impersonate
+  applies:
+    flow:
+      to_kind: [service, gateway]
+      auth: [bearer-token]
+  attack:
+    - Log in to a test account and decode your token to read its claims, which are only encoded, not encrypted.
+    - Change a claim such as the user ID or role, or sign the token with a different algorithm or key, and send it to {to}.
+    - Also try an expired token, and one issued for a different app by the same login provider, and see whether {to} accepts them.
+  defaults: {who: anyone, effort: moderate, impact: critical}
+  gives:
+    access: privileged
+  mitigations:
+    - id: verify-jwt-strictly
+      title: Verify every token with a maintained library, pinning the expected algorithm and signing key and checking issuer, audience and expiry
+      effect: eliminates
+      by_tech:
+        go: With `github.com/golang-jwt/jwt/v5`, pass `jwt.WithValidMethods`, `jwt.WithIssuer`, `jwt.WithAudience` and `jwt.WithExpirationRequired` to the parser.
+        node: "With `jose`, call `jwtVerify(token, keys, { algorithms: ['RS256'], issuer, audience })`, and never use a decode-only function for authentication."
+        python: With PyJWT, always pass `algorithms=["RS256"]` and `audience=...` to `jwt.decode()`, and never turn off `verify_signature`.
+    - id: short-lived-tokens-from-issuer-keys
+      title: Keep access tokens short-lived (minutes, not days), and load signing keys only from the configured issuer's published key set (JWKS)
+      effect: {impact: medium}
+  why_it_matters: >
+    JWT libraries will happily decode a token without verifying it, and some
+    still let the token choose its own algorithm. The code looks right because
+    the claims come out fine either way.
+  refs: {stride: [spoofing, elevation-of-privilege], cwe: [CWE-347, CWE-613], owasp: ["API2:2023"]}
+
+- id: session-fixation
+  title: Someone could take over a user's session on {to} by getting them to log in with a session ID the attacker already knows (session fixation), if the session isn't replaced at login
+  kind: impersonate
+  applies:
+    flow:
+      from_kind: [client]
+      to_kind: [service, identity]
+      auth: [session-cookie]
+  attack:
+    - Open {to} in a test browser without logging in and note the session cookie it sets.
+    - Put that same cookie into a second browser and log in there as a test user.
+    - See whether the first browser is now logged in too, because the session ID didn't change.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  gives:
+    access: any-user
+  mitigations:
+    - id: new-session-on-login
+      title: Issue a new session ID at login, logout and any change in privilege, and delete the old one on the server
+      effect: eliminates
+      by_tech:
+        go: With `alexedwards/scs`, call `sessionManager.RenewToken(ctx)` right after a successful login and before storing the user ID.
+        node: With `express-session`, call `req.session.regenerate()` after checking the password and before putting the user on the session.
+        python: Django rotates the session in `login()`, so call `request.session.cycle_key()` in any custom login path. In Flask, clear the session before setting the user.
+    - id: reject-unknown-session-ids
+      title: Ignore session IDs the server didn't create, and never accept a session ID from a URL
+      effect: {effort: hard}
+    - id: host-prefixed-session-cookie
+      title: Name the session cookie with the `__Host-` prefix so subdomains can't set it
+      effect: {effort: hard}
+  why_it_matters: >
+    Frameworks usually get this right by default, but custom login code,
+    single sign-on callbacks and remember-me paths often keep the pre-login session.
+  refs: {stride: [spoofing], cwe: [CWE-384], owasp: ["A07:2021"], capec: [CAPEC-61]}
+
+- id: mfa-fallback-bypass
+  title: Someone with a stolen password could get past multi-factor authentication (MFA) on {component} through a weaker fallback, such as text-message codes, a backup email, remember-this-device or a support reset
+  kind: impersonate
+  applies:
+    - component:
+        kind: [identity]
+    - component:
+        kind: [service]
+        features: [mfa]
+  attack:
+    - On a test account with MFA on, log in with the password and list every alternative the second step offers.
+    - Try each one, including backup codes, text messages, email links, remember-this-device and the lost-my-phone path.
+    - Also try calling a later step of the login flow directly, and see whether any route lets you in without the strong factor.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  gives:
+    access: any-user
+  mitigations:
+    - id: enforce-mfa-server-side
+      title: Track the MFA step on the server and refuse every logged-in endpoint until it's complete, so skipping a step in the flow doesn't work
+      effect: eliminates
+    - id: strong-mfa-fallbacks-only
+      title: Offer only strong fallbacks, such as a second passkey or single-use backup codes, and drop text-message and email codes for admin accounts
+      effect: {effort: hard}
+      by_tech:
+        cognito: Turn off SMS and email MFA for privileged user pools, require TOTP or passkeys, and don't let admins remember devices.
+        keycloak: Mark the OTP or WebAuthn step as Required, not Alternative, in the browser flow for admin realms.
+    - id: verified-mfa-reset
+      title: Make support-driven MFA resets require identity checks and a waiting period, and notify the old factor and email
+      effect: {effort: hard}
+    - id: alert-on-mfa-changes
+      title: Alert the user and the security team when MFA is turned off, reset, or a new factor is added
+      effect: detects
+  why_it_matters: >
+    MFA is only as strong as its weakest fallback. Attackers go straight for
+    the lost-my-phone path, and support desks are a favourite target.
+  refs: {stride: [spoofing], cwe: [CWE-288], owasp: ["A07:2021"]}
+
+- id: saml-assertion-validation
+  title: Someone could log in to {component} as any user, including admins, by sending a forged or altered single sign-on response (SAML) if its signature and conditions aren't validated strictly
+  kind: impersonate
+  applies:
+    component:
+      kind: [service, identity]
+      tech: [saml, adfs, shibboleth, simplesamlphp, ruby-saml, python3-saml, node-saml, passport-saml, crewjam-saml]
+      not_managed: true
+  attack:
+    - Log in through single sign-on in a test environment and capture the SAML response your browser posts to {component}.
+    - Change the user's email or group in it, or move or remove the signature, and post it again.
+    - Also replay an old response, or one issued for a different app, and see whether {component} accepts it.
+  defaults: {who: anyone, effort: hard, impact: critical}
+  gives:
+    access: privileged
+  mitigations:
+    - id: maintained-saml-library
+      title: Use a maintained SAML library at its latest version, and have it check the signature against the identity provider's pinned certificate
+      effect: eliminates
+      by_tech:
+        go: Use a current `crewjam/saml`, and load the identity provider's metadata from a pinned file rather than fetching it at login.
+        node: "Use a current `@node-saml/node-saml` (or passport-saml) with `wantAssertionsSigned: true` and the identity provider's certificate configured."
+        python: Use `python3-saml` with `strict` on and `wantAssertionsSigned` set in the security settings.
+    - id: read-identity-from-signed-part
+      title: Read the user's identity only from the part of the response the signature covers, never from unsigned elements
+      effect: eliminates
+    - id: check-assertion-conditions
+      title: Check the audience, recipient, time window and request ID of every assertion, and remember assertion IDs to refuse replays
+      effect: {effort: hard}
+  why_it_matters: >
+    SAML rests on XML signatures, which are notoriously easy to verify wrongly,
+    and bypasses in widely used SAML libraries are still found regularly. Code
+    that reads the unsigned part works perfectly in every normal login.
+  refs: {stride: [spoofing], cwe: [CWE-347]}
+
+- id: user-enumeration
+  title: Anyone could find out which email addresses have accounts on {component} from differences in the messages, status codes or response times of login, signup and password reset
+  kind: leak
+  applies:
+    - component:
+        kind: [identity]
+    - component:
+        kind: [service]
+        features: [login, signup, password-reset]
+  attack:
+    - Try login, signup and password reset with the address of a test account and with an address that has no account.
+    - Compare the messages, status codes and response times.
+    - Script the difference against a list of addresses to build a list of real customers.
+  defaults: {who: anyone, effort: trivial, impact: low}
+  mitigations:
+    - id: same-response-whether-account-exists
+      title: Return the same message, status code and roughly the same response time whether or not the account exists, such as "If that address has an account, we've sent an email"
+      effect: {effort: hard}
+      by_tech:
+        go: When the user isn't found, still compare the password against a fixed dummy hash so both paths take as long.
+        node: Call `bcrypt.compare` against a fixed dummy hash when the user doesn't exist, so timing doesn't give it away.
+        python: Django's `ModelBackend` already runs the hasher for unknown users, so keep that behaviour in custom backends.
+        cognito: Turn on Prevent user existence errors on every app client.
+    - id: signup-emails-existing-owner
+      title: When someone signs up with an address that already has an account, email the owner instead of showing an error
+      effect: {effort: hard}
+    - id: rate-limit-account-lookups
+      title: Rate-limit login, signup and reset per IP address and per target address
+      effect: {effort: hard}
+  why_it_matters: >
+    Each message seems helpful on its own. Together they give attackers a
+    checked list of your customers for phishing and password guessing, and
+    for some services just being a customer is sensitive.
+  refs: {stride: [information-disclosure], cwe: [CWE-204, CWE-208]}
+
+- id: long-admin-sessions
+  title: Someone who steals an admin's session or token from {component} could keep using it for days, if admin sessions last as long as everyone else's and never ask for login again
+  kind: impersonate
+  applies:
+    - component:
+        kind: [identity]
+    - component:
+        kind: [service]
+        features: [admin-panel]
+  attack:
+    - Log in as a test admin and note how long the session or refresh token stays valid, including after closing the browser.
+    - Copy the session to another browser, as session-stealing malware or a stolen laptop would.
+    - See how long it keeps working, and whether sensitive actions ever ask for the password or MFA again.
+  defaults: {who: anyone, effort: hard, impact: high}
+  gives:
+    access: privileged
+  mitigations:
+    - id: short-admin-sessions
+      title: Give admin sessions short idle and absolute timeouts (for example 15 minutes idle and 8 hours in total), separate from normal users
+      effect: {impact: medium}
+      by_tech:
+        keycloak: Put admins in their own realm or client with shorter SSO Session Idle and SSO Session Max, and short refresh token lifetimes.
+        cognito: Use a separate app client for admin tools with short access and refresh token validity.
+        entra-id: Use a Conditional Access sign-in frequency policy for admin roles.
+        azure-ad: Use a Conditional Access sign-in frequency policy for admin roles.
+    - id: step-up-for-admin-actions
+      title: Ask for MFA again before sensitive admin actions, such as changing roles, exporting data or turning off security settings
+      effect: {effort: hard}
+    - id: revoke-admin-sessions
+      title: Let admins see and end their sessions, and end all of them when their role or password changes
+      effect: {impact: medium}
+  why_it_matters: >
+    A stolen session cookie skips the password and MFA entirely, which is why
+    session-stealing malware goes after admins. Long admin sessions turn one
+    stolen cookie into days or weeks of full access.
+  refs: {stride: [spoofing, elevation-of-privilege], cwe: [CWE-613], owasp: ["A07:2021"]}

@@ -1,0 +1,146 @@
+# Network controls: gateways, segmentation, egress and traffic in transit.
+
+- id: gateway-bypass
+  title: Anyone could skip {from} and its protections by sending requests straight to {to}, because {to} also accepts traffic from the internet
+  kind: escalate
+  applies:
+    flow:
+      from_kind: [gateway]
+      to_exposure: [internet]
+  attack:
+    - Find the address of the service behind the gateway, for example from DNS history or certificate logs.
+    - Send requests to it directly instead of through the gateway.
+    - Rate limits, WAF rules and other protections on the gateway don't apply.
+  defaults: {who: anyone, effort: moderate, impact: high}
+  mitigations:
+    - id: accept-only-gateway-traffic
+      title: Only accept traffic to {to} from {from}, using network rules, mutual TLS or a secret header the gateway adds
+      effect: eliminates
+      by_tech:
+        aws: Put the service in private subnets and allow inbound only from the load balancer's security group.
+  why_it_matters: >
+    A gateway only protects traffic that goes through it. If the origin is
+    also public, every protection on the gateway is optional for attackers.
+  refs: {cwe: [CWE-284]}
+
+- id: flat-network
+  title: Someone who breaks into any one service in {zone} could reach {component} directly, because nothing on the network separates them
+  kind: escalate
+  applies:
+    component:
+      kind: [database, cache, queue, storage]
+      stores: [confidential, secret]
+      zone_trust: [trusted]
+      zone_network: [open]
+  attack:
+    - Get code running in any service in the same network, through any bug.
+    - Connect to {component} from there.
+    - Use weak or shared credentials, or a missing auth check, to read the {data}.
+  defaults: {who: insider, effort: moderate, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: segment-network
+      title: "Segment the network so only the services that need {component} can connect to it (security groups or network policies), then mark the zone `network: segmented`"
+      effect: {effort: hard}
+  why_it_matters: >
+    On a flat network, a bug in the least important service is a path to
+    the most important data. Segmentation limits how far one break-in spreads.
+  refs: {cwe: [CWE-923]}
+
+- id: unrestricted-egress
+  title: Someone who gets code running in {component} could send data anywhere on the internet, because it can make outbound connections freely
+  kind: leak
+  applies:
+    component:
+      kind: [service]
+      zone_trust: [trusted]
+      zone_egress: [open]
+  attack:
+    - Get code running in {component} through any bug or a compromised dependency.
+    - Read whatever data it has access to.
+    - Upload it to a server of their choosing over HTTPS or DNS.
+  defaults: {who: anyone, effort: hard, impact: high}
+  mitigations:
+    - id: restrict-egress
+      title: "Allow outbound traffic only to the destinations the service needs (egress firewall or proxy), then mark the zone `egress: restricted`"
+      effect: {impact: medium}
+    - id: alert-on-unusual-egress
+      title: Alert on outbound traffic to new destinations or unusual volumes
+      effect: detects
+  why_it_matters: >
+    Getting data out is the last step of almost every breach. If services
+    can talk to anywhere, there's nothing to stop or notice it.
+  refs: {cwe: [CWE-200]}
+
+- id: admin-interfaces-exposed
+  title: Anyone could try to log in to {component}'s admin interfaces, such as SSH, remote desktop or database consoles, if they're reachable from the internet
+  kind: impersonate
+  applies:
+    component:
+      kind: [service, database, cache, queue, gateway]
+      exposure: [internet]
+      not_managed: true
+  attack:
+    - Scan the public address for admin ports.
+    - Try default, weak or leaked credentials, or a known vulnerability in the admin service.
+    - Once in, act with administrator access.
+  defaults: {who: anyone, effort: moderate, impact: critical}
+  gives:
+    controls: ["{component}"]
+  mitigations:
+    - id: no-public-admin-ports
+      title: Close admin ports to the internet and reach them only through SSO-protected access such as a bastion or session manager
+      effect: eliminates
+      by_tech:
+        aws: Use SSM Session Manager instead of open SSH, and remove 0.0.0.0/0 rules for admin ports.
+  why_it_matters: >
+    Admin ports are scanned constantly. One weak password or unpatched
+    admin service is a direct path to full control.
+  refs: {cwe: [CWE-284]}
+
+- id: gateway-config-tampering
+  title: Someone who can change {component}'s configuration could switch off its protections or redirect traffic without anyone reviewing it
+  kind: tamper
+  applies:
+    component:
+      kind: [gateway]
+  attack:
+    - Get access to the gateway's console or API, for example with a stolen admin account.
+    - Disable WAF rules, rate limits or TLS settings, or point a route somewhere else.
+    - Nothing flags the change because it isn't reviewed or alerted on.
+  defaults: {who: insider, effort: trivial, impact: high}
+  mitigations:
+    - id: gateway-config-as-code
+      title: Manage gateway configuration as code, changed only through reviewed pull requests
+      effect: {who: privileged}
+    - id: alert-on-gateway-changes
+      title: Alert on any configuration change made outside the deploy pipeline
+      effect: detects
+  why_it_matters: >
+    Everything behind a gateway depends on its settings. A quiet change
+    there undoes every protection at once.
+  refs: {cwe: [CWE-284]}
+
+- id: unencrypted-traffic
+  title: Someone on the network path could read or change {data} sent from {from} to {to} if the traffic isn't encrypted
+  kind: leak
+  applies:
+    flow:
+      in_transit: [unencrypted, unknown]
+      carries: [confidential, secret]
+  attack:
+    - Get a position on the network path, such as a shared network, a compromised host or a misconfigured proxy.
+    - Capture the traffic between {from} and {to}.
+    - Read the data, or change it on the way.
+  defaults: {who: insider, effort: moderate, impact: high}
+  gives:
+    reads: ["{data}"]
+  mitigations:
+    - id: encrypt-in-transit
+      title: "Encrypt the connection with TLS (or mutual TLS between services) and verify certificates, then mark the flow `encrypted: true`"
+      effect: eliminates
+  why_it_matters: >
+    "It's internal" traffic still crosses switches, hosts and cloud
+    networks you don't fully control. Unencrypted traffic can also be changed.
+  refs: {cwe: [CWE-319]}
